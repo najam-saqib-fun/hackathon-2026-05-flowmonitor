@@ -50,8 +50,9 @@ npm start        # production
 
 ```bash
 cd frontend && npm install
-npm start        # ng serve → http://localhost:4200
-npm run build    # production build (font inlining disabled; budget 5 MB)
+npm start             # ng serve --host 0.0.0.0 --port 4200 → http://localhost:4200
+npm run build         # development build
+npm run build:prod    # production build (font inlining disabled; budget 5 MB)
 ```
 
 ---
@@ -142,15 +143,77 @@ Key classes all live in `src/flow_monitor.cpp`:
 
 `backend/src/db.js` — mysql2 promise pool (20 connections). `ensureSchema()` called on server start; seeds `admin` / `admin123` if `users` is empty.
 
-`backend/src/websocket.js` — authenticated via JWT query param `?token=`. Pushes `{type:'live_update', data:{live_flows, overview, top_apps, top_talkers}}` every `WS_PUSH_INTERVAL_MS` ms. `live_flows` query joins `application_mappings` subquery for category (column was removed from `flows` table; derived at query time).
+`backend/src/websocket.js` — authenticated via JWT query param `?token=`. Pushes `{type:'live_update', data:{live_flows, overview, top_apps, top_talkers}}` every `WS_PUSH_INTERVAL_MS` ms. Bandwidth history is **not** in the WS push — the frontend polls `GET /api/stats/bandwidth` independently on its own 15 s timer. Alert check runs every 30 s in the same WS server process and broadcasts `{type:'alert'}` to all connected clients.
 
 `application_category` **no longer exists as a column** in `flows`. All queries that need it must LEFT JOIN: `(SELECT application, MIN(category) AS category FROM application_mappings GROUP BY application) am ON am.application = f.application`.
+
+### API surface (`backend/src/index.js`)
+
+All routes require `Authorization: Bearer <jwt>` except `/api/auth/login` and `/api/health`.
+
+```
+POST   /api/auth/login
+GET    /api/auth/me
+GET    /api/auth/users
+POST   /api/auth/users
+
+GET    /api/flows                   # paginated, filterable
+GET    /api/flows/live              # active last 30 s
+GET    /api/flows/:id
+
+GET    /api/stats/overview
+GET    /api/stats/top-apps
+GET    /api/stats/top-talkers
+GET    /api/stats/bandwidth         # polled by frontend every 15 s
+GET    /api/stats/protocol-distribution
+GET    /api/stats/anomalies
+GET    /api/stats/history
+GET    /api/stats/app-detection
+
+GET    /api/alerts/rules
+POST   /api/alerts/rules
+PUT    /api/alerts/rules/:id
+DELETE /api/alerts/rules/:id
+GET    /api/alerts/events
+POST   /api/alerts/events/:id/acknowledge
+
+GET    /api/domains
+GET    /api/domains/chart
+GET    /api/domains/unique-sources
+
+GET    /api/mappings
+POST   /api/mappings
+PUT    /api/mappings/:id
+DELETE /api/mappings/:id
+POST   /api/mappings/import
+GET    /api/mappings/export
+GET    /api/mappings/applications   # autocomplete: ?q=
+
+GET    /api/subscribers
+POST   /api/subscribers
+PUT    /api/subscribers/:id
+DELETE /api/subscribers/:id
+POST   /api/subscribers/import
+GET    /api/subscribers/export
+
+GET    /api/ipdr
+GET    /api/ipdr/:id/flows
+
+GET    /api/policy
+PUT    /api/policy/:application
+POST   /api/policy/bulk
+
+GET    /api/health
+ws://  /ws?token=<jwt>
+```
 
 ---
 
 ## Architecture: frontend
 
 Standalone Angular 17 components with lazy-loaded routes. All API calls go through `src/app/core/services/api.service.ts`. Auth token stored in `localStorage['token']`; `AuthInterceptor` attaches it as `Bearer` header.
+
+Routes (`src/app/app.routes.ts`): `dashboard`, `flows`, `domains`, `mappings`, `subscribers`, `ipdr`, `alerts`, `policy` — all behind `authGuard`. The shell component (`app-shell.component.ts`) provides the sidenav layout.
 
 `FlowDetailModalComponent` is declared inline in the same file as its parent and opened via `MatDialog` — not via `window.open`. All modal dialogs use `panelClass: 'dark-dialog'` (defined in `src/styles.scss`).
 
@@ -174,9 +237,13 @@ Migrations in `create_schema()` (C++) and `ensureSchema()` (Node.js) are wrapped
 
 ```
 PORT=3000
-DB_HOST=127.0.0.1  DB_PORT=3306  DB_USER=root  DB_PASS=<your-db-password>  DB_NAME=flowmon
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USER=root
+DB_PASS=<your-db-password>
+DB_NAME=flowmon
 JWT_SECRET=change-me-to-a-long-random-secret
 JWT_EXPIRES_IN=24h
-WS_PUSH_INTERVAL_MS=3000
+WS_PUSH_INTERVAL_MS=15000
 GEOIP_DB_PATH=          # optional MaxMind GeoLite2 path
 ```
