@@ -29,8 +29,9 @@ frontend/node_modules/
 frontend/dist/
 frontend/.angular/
 
-# ── Claude Code internal ─────────────────────────────────────
-.claude/
+# ── Claude Code internal (settings only — .md docs are tracked) ──
+.claude/settings.local.json
+.claude/skills/
 
 # ── OS / editor ──────────────────────────────────────────────
 .DS_Store
