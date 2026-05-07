@@ -1,0 +1,86 @@
+Two terminals — daemon stays up, you stream pcaps into it.                                                                                                                            
+                                                                                                                                                                                        
+  Terminal A — start the daemon                                                                                                                                                         
+                                                                                                                                                                                        
+  cd /home/najam/Documents/funavry/claude
+  export LD_LIBRARY_PATH="$PWD/third_party/ndpi-install/lib:$LD_LIBRARY_PATH"                                                                                                           
+                                                                                                                                                                                        
+  ./build/flow_monitor --socket /tmp/flow_monitor.sock --mysql-host 127.0.0.1 --mysql-port 3306 --mysql-user flowmon --mysql-pass 'Najam123!' --mysql-db flowmon --flow-timeout 60 --verbose
+
+  You'll see [flow_monitor] ready: socket=/tmp/flow_monitor.sock mysql=flowmon@127.0.0.1:3306/flowmon (tcp) timeout=60s and the prompt blocks. The daemon auto-creates the flowmon      
+  database if it doesn't exist.
+                                                                                                                                                                                        
+  Terminal B — capture & feed a pcap                                                                                                                                                    
+   
+  Capture (you can skip this if you already have a .pcap):                                                                                                                              
+                                                            
+  ip -br link                          # find your interface                                                                                                                            
+  sudo tcpdump -i wlp3s0 -w mytraffic.pcap -c 5000
+  sudo chown $USER:$USER mytraffic.pcap                                                                                                                                                 
+                                                                                                                                                                                        
+  Feed it through:                                                                                                                                                                      
+                                                                                                                                                                                        
+  cd /home/najam/Documents/funavry/claude                   
+./build/pcap_processor --input mytraffic1.pcap --socket /tmp/flow_monitor.sock --batch-size 200 --max-payload 1024 --verbose
+                                                                                                                                                                                        
+  pcap_processor exits when the pcap is done. You can run it again with another pcap — the daemon keeps accumulating into the same DB.                                                  
+   
+  Terminal A — stop when done                                                                                                                                                           
+                                                            
+  Ctrl-C. The daemon prints flushed all flows and exits, having written every still-open flow to MySQL.                                                                                 
+                                                            
+  Inspect the data                                                                                                                                                                      
+                                                            
+  mysql -h127.0.0.1 -uflowmon -p'Najam123!' flowmon
+  mysql --table flowmon -h127.0.0.1 -uflowmon -p'Najam123!' < queries.sql                                                                                                               
+                                                                                                                                                                                        
+  One-shot variant (no two-terminal dance)                                                                                                                                              
+                                                                                                                                                                                        
+  MYSQL_USER=flowmon MYSQL_PASS='Najam123!' MYSQL_DB=flowmon \                                                                                                                          
+      ./test.sh /path/to/mytraffic.pcap                     
+                                                                                                                                                                                        
+  test.sh boots the daemon, drops & recreates the DB so you start clean, streams the pcap, sends SIGTERM, and prints summary tables. Good for "run once and look at results"; use the   
+  two-terminal flow when you want to ingest several pcaps into the same database.                                                                                                       
+                                           
+
+                                           sudo tcpdump -i wlp1s0 -w mytraffic1.pcap
+
+
+  What changed                                                                                                                                                                          
+                                        
+  1. Empty-tables bug — fixed. Previously flows only persisted on sweep_expired (60s idle) or shutdown (Ctrl+C). For pcaps that span <60s and exit cleanly, nothing ever hit the DB. Now
+   sync_active() runs every 30s of pcap-time AND on every client disconnect, so all in-memory flows reach flows / applications_summary.                                                 
+                                                                                                                                                                                        
+  2. Periodic 30s UPSERT. New --sync-interval <seconds> flag (default 30, set to 0 to disable). While a flow is active, every 30s its current bytes_sent/recv, packet_sent/recv,        
+  end_time, urls, hostnames, and application are UPSERTed into flows. The row is updated in place — no duplicates.                                                                      
+                                                                                                                                                                                        
+  3. Flow re-creation after expiry — fixed. The DB-side flow_hash now includes start_time_us (md5(canonical_5tuple + "_" + start_us)), so when a flow expires after 60s and the same    
+  5-tuple comes back, it lands in a brand-new row. The in-memory map still keys on the canonical 5-tuple hash so packets find their existing flow during its lifetime.                  
+                                                                                                                                                                                        
+  4. Live capture mode. New --interface <nic> and --bpf-filter <expr> flags. When --interface is set, the unix-socket listener is skipped and flow_monitor opens libpcap on the NIC     
+  directly — same packet → flow logic, no pcap_processor needed.
+                                                                                                                                                                                        
+  How to run                                                
+
+  Live capture (new):                                                                                                                                                                   
+  sudo ./build/flow_monitor --interface wlp1s0 --mysql-host 127.0.0.1 --mysql-port 3306 --mysql-user flowmon --mysql-pass 'Najam123!' --mysql-db flowmon --flow-timeout 60 --sync-interval 30 --verbose                                                                                                                                    
+  Needs sudo (or CAP_NET_RAW) to read raw packets. Add --bpf-filter "tcp or udp" to drop ARP/ICMP if you like. Press Ctrl+C to stop — flush_all runs and writes whatever is left in     
+  memory.                                                                                                                                                                               
+                                                                                                                                                                                        
+  Pcap replay (existing pipeline, but now actually persists):                                                                                                                           
+  ./build/flow_monitor --socket /tmp/flow_monitor.sock \                                                                                                                                
+      --mysql-user flowmon --mysql-pass 'Najam123!' --mysql-db flowmon --verbose &
+  ./build/pcap_processor --input mytraffic.pcap --socket /tmp/flow_monitor.sock --verbose                                                                                               
+  You should now see flow_monitor log synced N active flows when pcap_processor finishes, and the flows / applications_summary tables will be populated even without Ctrl+C.            
+                                                                                                                                                                                        
+  Lifecycle (matches your spec)                                                                                                                                                         
+                                                                                                                                                                                        
+  - New 5-tuple → row inserted in flows with start_time set.                                                                                                                            
+  - Same 5-tuple → counters/URLs/hostnames accumulated to that row, end_time advanced.                                                                                                  
+  - Every 30s active flows are UPSERTed (visible in DB while still in memory).                                                                                                          
+  - 60s of silence → final UPSERT, flow removed from RAM.                                                                                                                               
+  - Same 5-tuple after expiry → brand-new row (different flow_hash, new start_time).  
+
+
+
+  sudo ./build/flow_monitor --interface wlp1s0 --mysql-host 127.0.0.1 --mysql-port 3306 --mysql-user flowmon --mysql-pass 'Najam123!' --mysql-db flowmon --flow-timeout 60 --sync-interval 30 --verbose

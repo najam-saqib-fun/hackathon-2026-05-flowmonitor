@@ -1,0 +1,52 @@
+# ── C++ build artifacts ──────────────────────────────────────
+build/
+*.o
+*.a
+*.so
+*.d
+
+# ── nDPI local build (third_party) ───────────────────────────
+third_party/nDPI/
+third_party/ndpi-install/
+
+# ── Compiled binaries at root ────────────────────────────────
+flow_monitor
+pcap_processor
+
+# ── PCAP capture files ───────────────────────────────────────
+*.pcap
+*.pcapng
+*.cap
+
+# ── Backend ──────────────────────────────────────────────────
+backend/node_modules/
+backend/.env
+backend/.env.local
+backend/.env.production
+
+# ── Frontend ─────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.angular/
+
+# ── Claude Code internal ─────────────────────────────────────
+.claude/
+
+# ── OS / editor ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.code-workspace
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+
+# ── Secrets / local config ───────────────────────────────────
+*.pem
+*.key
+config.local.json
