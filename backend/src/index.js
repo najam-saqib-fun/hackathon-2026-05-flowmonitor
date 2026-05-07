@@ -16,6 +16,7 @@ const domainsRoutes     = require('./routes/domains');
 const mappingsRoutes    = require('./routes/mappings');
 const subscribersRoutes = require('./routes/subscribers');
 const ipdrRoutes        = require('./routes/ipdr');
+const policyRoutes      = require('./routes/policy');
 
 const app = express();
 const server = http.createServer(app);
@@ -35,6 +36,7 @@ app.use('/api/domains',     domainsRoutes);
 app.use('/api/mappings',    mappingsRoutes);
 app.use('/api/subscribers', subscribersRoutes);
 app.use('/api/ipdr',        ipdrRoutes);
+app.use('/api/policy',     policyRoutes);
 
 // API index
 app.get('/api', (_req, res) => {

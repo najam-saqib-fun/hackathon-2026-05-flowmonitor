@@ -21,7 +21,7 @@ Two terminals — daemon stays up, you stream pcaps into it.
   Feed it through:                                                                                                                                                                      
                                                                                                                                                                                         
   cd /home/najam/Documents/funavry/claude                   
-./build/pcap_processor --input mytraffic1.pcap --socket /tmp/flow_monitor.sock --batch-size 200 --max-payload 1024 --verbose
+./build/pcap_processor --input mytraffic1.pcap --socket /tmp/flow_monitor.sock --batch-size 400 --max-payload 1024 --verbose
                                                                                                                                                                                         
   pcap_processor exits when the pcap is done. You can run it again with another pcap — the daemon keeps accumulating into the same DB.                                                  
    

@@ -40,7 +40,8 @@ router.post('/', requireAdmin, async (req, res) => {
     if (!pattern_type || !pattern || !application) {
       return res.status(400).json({ error: 'pattern_type, pattern, application required' });
     }
-    if (!VALID_TYPES.includes(pattern_type)) {
+    //{"error":"VALID_TYPES.includes is not a function"}
+    if (!VALID_TYPES.has(pattern_type)) {
       return res.status(400).json({ error: `pattern_type must be one of: ${VALID_TYPES.join(', ')}` });
     }
     const result = await query(
@@ -72,7 +73,7 @@ router.get('/applications', requireAuth, async (req, res) => {
 router.put('/:id', requireAdmin, async (req, res) => {
   try {
     const { pattern_type, pattern, application, category, priority, notes } = req.body;
-    if (pattern_type && !VALID_TYPES.includes(pattern_type)) {
+    if (pattern_type && !VALID_TYPES.has(pattern_type)) {
       return res.status(400).json({ error: `Invalid pattern_type` });
     }
     await query(
@@ -130,11 +131,11 @@ router.post('/import', requireAdmin, async (req, res) => {
     for (const row of rows) {
       const { pattern_type, pattern, application, category, priority = 100, notes } = row;
       if (!pattern_type || !pattern || !application) { skipped++; continue; }
-      if (!VALID_TYPES.includes(pattern_type)) { errors.push(`Invalid type: ${pattern_type}`); skipped++; continue; }
+      if (!VALID_TYPES.has(pattern_type)) { errors.push(`Invalid type: ${pattern_type}`); skipped++; continue; }
       try {
         await query(
           'INSERT IGNORE INTO application_mappings (pattern_type, pattern, application, category, priority, notes) VALUES (?, ?, ?, ?, ?, ?)',
-          [pattern_type, pattern.toLowerCase(), application, category || null, parseInt(priority) || 100, notes || null]
+          [pattern_type, pattern.trim().toLowerCase(), application.trim(), category ? category.trim() : null, parseInt(priority) || 100, notes ? notes.trim() : null]
         );
         inserted++;
       } catch { skipped++; }

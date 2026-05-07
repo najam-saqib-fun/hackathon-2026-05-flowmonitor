@@ -14,11 +14,16 @@
 #include <netinet/if_ether.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <netinet/ip6.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+#ifndef ETHERTYPE_IPV6
+#define ETHERTYPE_IPV6 0x86DD
+#endif
 
 #include <cerrno>
 #include <cstdint>
@@ -69,8 +74,8 @@ bool send_all(int fd, const void* buf, size_t len) {
     return true;
 }
 
-// Walk past the link layer to find the start of the IPv4 header. Returns
-// the offset on success or 0 on failure / non-IPv4 packets.
+// Walk past the link layer to find the start of the IP header (v4 or v6).
+// Returns the offset on success, or 0 on failure / unsupported encapsulation.
 size_t l3_offset(int link_type, const u_char* packet, size_t caplen) {
     if (link_type == DLT_EN10MB) {
         if (caplen < sizeof(ether_header)) return 0;
@@ -83,28 +88,31 @@ size_t l3_offset(int link_type, const u_char* packet, size_t caplen) {
             etype = ntohs(*reinterpret_cast<const uint16_t*>(packet + off + 2));
             off += 4;
         }
-        return etype == ETHERTYPE_IP ? off : 0;
+        return (etype == ETHERTYPE_IP || etype == ETHERTYPE_IPV6) ? off : 0;
     }
     if (link_type == DLT_RAW) return 0;  // pure IP, no L2 to strip
     if (link_type == DLT_LINUX_SLL) {
         if (caplen < 16) return 0;
         uint16_t etype = ntohs(*reinterpret_cast<const uint16_t*>(packet + 14));
-        return etype == ETHERTYPE_IP ? 16 : 0;
+        return (etype == ETHERTYPE_IP || etype == ETHERTYPE_IPV6) ? 16 : 0;
     }
     if (link_type == DLT_LINUX_SLL2) {
         if (caplen < 20) return 0;
         uint16_t etype = ntohs(*reinterpret_cast<const uint16_t*>(packet));
-        return etype == ETHERTYPE_IP ? 20 : 0;
+        return (etype == ETHERTYPE_IP || etype == ETHERTYPE_IPV6) ? 20 : 0;
     }
     if (link_type == DLT_NULL || link_type == DLT_LOOP) {
         if (caplen < 4) return 0;
         uint32_t family = *reinterpret_cast<const uint32_t*>(packet);
-        return (family == 2 /* AF_INET */) ? 4 : 0;
+        // AF_INET=2; AF_INET6=10 (Linux), 28 (FreeBSD), 30 (macOS)
+        if (family == 2 || family == 10 || family == 28 || family == 30) return 4;
+        return 0;
     }
     // Unknown: best-effort assume Ethernet.
     if (caplen >= sizeof(ether_header)) {
         const ether_header* eth = reinterpret_cast<const ether_header*>(packet);
-        return ntohs(eth->ether_type) == ETHERTYPE_IP ? sizeof(ether_header) : 0;
+        uint16_t et = ntohs(eth->ether_type);
+        return (et == ETHERTYPE_IP || et == ETHERTYPE_IPV6) ? sizeof(ether_header) : 0;
     }
     return 0;
 }
@@ -220,30 +228,74 @@ int main(int argc, char** argv) {
 
         size_t off = l3_offset(link_type, packet, header->caplen);
         if (off == 0 && link_type != DLT_RAW) continue;
+        if (header->caplen < off + 1) continue;
 
-        if (header->caplen < off + sizeof(ip)) continue;
-        const ip* iph = reinterpret_cast<const ip*>(packet + off);
-        if (iph->ip_v != 4) continue;
-        size_t ip_hl = static_cast<size_t>(iph->ip_hl) * 4;
-        if (ip_hl < 20 || header->caplen < off + ip_hl) continue;
+        const uint8_t ip_ver = (packet[off] >> 4) & 0x0F;
 
         PacketMessage msg{};
         msg.timestamp_us = static_cast<uint64_t>(header->ts.tv_sec) * 1000000ULL
                          + static_cast<uint64_t>(header->ts.tv_usec);
-        msg.src_ip   = iph->ip_src.s_addr;
-        msg.dst_ip   = iph->ip_dst.s_addr;
-        msg.protocol = iph->ip_p;
-        msg.packet_len = ntohs(iph->ip_len);
 
-        const uint8_t* l4 = packet + off + ip_hl;
-        size_t l4_avail = header->caplen - (off + ip_hl);
+        const uint8_t* l4 = nullptr;
+        size_t l4_avail = 0;
+
+        if (ip_ver == 4) {
+            if (header->caplen < off + sizeof(ip)) continue;
+            const ip* iph = reinterpret_cast<const ip*>(packet + off);
+            const size_t ip_hl = static_cast<size_t>(iph->ip_hl) * 4;
+            if (ip_hl < 20 || header->caplen < off + ip_hl) continue;
+
+            std::memset(msg.src_ip, 0, 16);
+            std::memset(msg.dst_ip, 0, 16);
+            std::memcpy(msg.src_ip, &iph->ip_src.s_addr, 4);
+            std::memcpy(msg.dst_ip, &iph->ip_dst.s_addr, 4);
+            msg.protocol   = iph->ip_p;
+            msg.ip_version = 4;
+            msg.packet_len = ntohs(iph->ip_len);
+            l4             = packet + off + ip_hl;
+            l4_avail       = header->caplen - (off + ip_hl);
+
+        } else if (ip_ver == 6) {
+            if (header->caplen < off + 40) continue;  // IPv6 fixed header = 40 bytes
+            const ip6_hdr* ip6h = reinterpret_cast<const ip6_hdr*>(packet + off);
+
+            std::memcpy(msg.src_ip, &ip6h->ip6_src, 16);
+            std::memcpy(msg.dst_ip, &ip6h->ip6_dst, 16);
+            msg.ip_version = 6;
+            msg.packet_len = static_cast<uint16_t>(40 + ntohs(ip6h->ip6_plen));
+
+            // Walk extension headers to reach the transport layer.
+            uint8_t next_hdr = ip6h->ip6_nxt;
+            size_t ext_off   = off + 40;
+            bool valid = true;
+            while (next_hdr == 0   /*HopByHop*/  ||
+                   next_hdr == 43  /*Routing*/    ||
+                   next_hdr == 60  /*Destination*/) {
+                if (header->caplen < ext_off + 2) { valid = false; break; }
+                const uint8_t* ext = packet + ext_off;
+                next_hdr  = ext[0];
+                ext_off  += (static_cast<size_t>(ext[1]) + 1) * 8;
+                if (ext_off > header->caplen) { valid = false; break; }
+            }
+            // Skip fragment headers (reassembly not supported) and no-next-header.
+            if (!valid || next_hdr == 44 || next_hdr == 59) continue;
+
+            msg.protocol = next_hdr;
+            l4           = (ext_off < header->caplen) ? packet + ext_off : nullptr;
+            l4_avail     = (ext_off < header->caplen) ? header->caplen - ext_off : 0;
+
+        } else {
+            continue;  // not IPv4 or IPv6
+        }
+
+        // Extract ports from TCP/UDP header.
         if (msg.protocol == IPPROTO_TCP) {
-            if (l4_avail < sizeof(tcphdr)) continue;
+            if (!l4 || l4_avail < sizeof(tcphdr)) continue;
             const tcphdr* th = reinterpret_cast<const tcphdr*>(l4);
             msg.src_port = ntohs(th->th_sport);
             msg.dst_port = ntohs(th->th_dport);
         } else if (msg.protocol == IPPROTO_UDP) {
-            if (l4_avail < sizeof(udphdr)) continue;
+            if (!l4 || l4_avail < sizeof(udphdr)) continue;
             const udphdr* uh = reinterpret_cast<const udphdr*>(l4);
             msg.src_port = ntohs(uh->uh_sport);
             msg.dst_port = ntohs(uh->uh_dport);

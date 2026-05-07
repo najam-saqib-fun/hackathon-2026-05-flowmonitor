@@ -120,6 +120,31 @@ async function ensureSchema(pool) {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS applications_summary (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        application VARCHAR(255) NOT NULL,
+        category VARCHAR(255),
+        total_flows BIGINT UNSIGNED DEFAULT 0,
+        total_packets_sent BIGINT UNSIGNED DEFAULT 0,
+        total_packets_recv BIGINT UNSIGNED DEFAULT 0,
+        total_bytes_sent BIGINT UNSIGNED DEFAULT 0,
+        total_bytes_recv BIGINT UNSIGNED DEFAULT 0,
+        total_duration_ms DOUBLE DEFAULT 0,
+        first_seen DATETIME(6),
+        last_seen DATETIME(6),
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_application (application)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    await conn.query(`
+      CREATE TABLE IF NOT EXISTS capture_policy (
+        application VARCHAR(255) NOT NULL PRIMARY KEY,
+        enabled TINYINT(1) NOT NULL DEFAULT 1
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
     // Migration: add ipdr_key_id to flows
     try { await conn.query('ALTER TABLE flows ADD COLUMN ipdr_key_id BIGINT UNSIGNED AFTER metadata'); } catch {}
     try { await conn.query('ALTER TABLE flows ADD KEY idx_flow_ipdr (ipdr_key_id)'); } catch {}

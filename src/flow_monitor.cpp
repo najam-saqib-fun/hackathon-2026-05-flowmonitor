@@ -22,8 +22,13 @@
 #include <netinet/if_ether.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <netinet/ip6.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
+
+#ifndef ETHERTYPE_IPV6
+#define ETHERTYPE_IPV6 0x86DD
+#endif
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -73,7 +78,7 @@ struct Config {
 
     int flow_timeout_seconds = 60;
     int sync_interval_seconds = 5;   // real-time sync every 5s; 0 disables
-    int ndpi_max_packets = 16;
+    int ndpi_max_packets = 64;
     int sweep_every_packets = 1000;
     size_t max_active_flows = 100000;
     bool verbose = false;
@@ -159,8 +164,9 @@ struct Flow {
     uint16_t src_port = 0;
     uint16_t dst_port = 0;
     uint8_t  protocol = 0;
-    uint32_t src_ip_n = 0;  // network-byte-order copy of the original src
-    uint32_t dst_ip_n = 0;
+    uint8_t  ip_version = 4;
+    uint8_t  src_ip_bytes[16] = {};  // raw address bytes for direction detection
+    uint8_t  dst_ip_bytes[16] = {};
 
     uint64_t packets_sent = 0;
     uint64_t packets_recv = 0;
@@ -199,12 +205,15 @@ struct Flow {
 // ============================================================================
 // Helpers
 // ============================================================================
-static std::string ipv4_to_str(uint32_t addr_network_order) {
+static std::string ip_bytes_to_str(const uint8_t* bytes, uint8_t version) {
+    if (version == 6) {
+        char buf[INET6_ADDRSTRLEN];
+        if (inet_ntop(AF_INET6, bytes, buf, sizeof(buf))) return std::string(buf);
+        return "::";
+    }
     char buf[INET_ADDRSTRLEN];
-    struct in_addr a;
-    a.s_addr = addr_network_order;
-    if (!inet_ntop(AF_INET, &a, buf, sizeof(buf))) return "0.0.0.0";
-    return std::string(buf);
+    if (inet_ntop(AF_INET, bytes, buf, sizeof(buf))) return std::string(buf);
+    return "0.0.0.0";
 }
 
 static std::string canonical_flow_hash(const std::string& ip1, const std::string& ip2,
@@ -1461,7 +1470,8 @@ public:
         if (!f) return;
 
         const bool same_dir =
-            (m.src_ip == f->src_ip_n && m.dst_ip == f->dst_ip_n &&
+            (std::memcmp(m.src_ip, f->src_ip_bytes, 16) == 0 &&
+             std::memcmp(m.dst_ip, f->dst_ip_bytes, 16) == 0 &&
              m.src_port == f->src_port && m.dst_port == f->dst_port);
 
         if (same_dir) {
@@ -1565,6 +1575,12 @@ public:
         if (flows_.empty()) return;
         db_.commit_tx();
         db_.begin_tx();
+
+        // Use the current wall clock as the refresh timestamp for IPDR keys.
+        const uint64_t now_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+
         for (auto& kv : flows_) {
             Flow& f = *kv.second;
             // finalize_protocol applies mapping overrides so f.application is
@@ -1575,6 +1591,17 @@ public:
             // sync time are skipped; they will be re-evaluated at expiry.
             if (policy_active_ && !allowed_apps_.count(f.application)) continue;
             db_.persist_flow_id(f);
+
+            // Keep the IPDR key alive while the flow is still active so it
+            // doesn't close during a long-running session (e.g. YouTube stream).
+            if (!f.application.empty() && f.application != "Unknown") {
+                const std::string lk = f.src_ip + "|" + f.dst_ip + "|" +
+                                       std::to_string(f.dst_port) + "|" + f.application;
+                auto it = ipdr_keys_.find(lk);
+                if (it != ipdr_keys_.end()) {
+                    it->second.last_seen_us = now_us;
+                }
+            }
         }
         db_.commit_tx();
         db_.begin_tx();
@@ -1597,8 +1624,8 @@ private:
     std::chrono::steady_clock::time_point last_sync_time_ = std::chrono::steady_clock::now();
 
     Flow* lookup_or_create(const PacketMessage& m) {
-        std::string ip_a = ipv4_to_str(m.src_ip);
-        std::string ip_b = ipv4_to_str(m.dst_ip);
+        std::string ip_a = ip_bytes_to_str(m.src_ip, m.ip_version);
+        std::string ip_b = ip_bytes_to_str(m.dst_ip, m.ip_version);
         // Canonical 5-tuple hash — used as the in-memory map key only. After
         // a flow expires the entry is removed; a new packet then re-creates
         // the entry under the same canonical key, but with a fresh DB
@@ -1611,8 +1638,9 @@ private:
         auto f = std::make_unique<Flow>();
         f->src_ip = ip_a;
         f->dst_ip = ip_b;
-        f->src_ip_n = m.src_ip;
-        f->dst_ip_n = m.dst_ip;
+        f->ip_version = m.ip_version;
+        std::memcpy(f->src_ip_bytes, m.src_ip, 16);
+        std::memcpy(f->dst_ip_bytes, m.dst_ip, 16);
         f->src_port = m.src_port;
         f->dst_port = m.dst_port;
         f->protocol = m.protocol;
@@ -1814,9 +1842,12 @@ private:
             if (mappings_.lookup_by_ip(f.dst_ip, m)) matched = true;
             else if (mappings_.lookup_by_ip(f.src_ip, m)) matched = true;
         }
-        if (!matched) {
-            const uint32_t dst_h = ntohl(f.dst_ip_n);
-            const uint32_t src_h = ntohl(f.src_ip_n);
+        if (!matched && f.ip_version == 4) {
+            uint32_t dst_n, src_n;
+            std::memcpy(&dst_n, f.dst_ip_bytes, 4);
+            std::memcpy(&src_n, f.src_ip_bytes, 4);
+            const uint32_t dst_h = ntohl(dst_n);
+            const uint32_t src_h = ntohl(src_n);
             if (mappings_.lookup_by_cidr(dst_h, m)) matched = true;
             else if (mappings_.lookup_by_cidr(src_h, m)) matched = true;
         }
@@ -2014,7 +2045,7 @@ static size_t wifi_l3_offset(const u_char* dot11, size_t len, size_t base) {
     if (llc[0] != 0xAA || llc[1] != 0xAA || llc[2] != 0x03) return 0;
     if (llc[3] != 0x00 || llc[4] != 0x00 || llc[5] != 0x00) return 0;
     const uint16_t etype = (static_cast<uint16_t>(llc[6]) << 8) | llc[7];
-    if (etype != ETHERTYPE_IP) return 0;
+    if (etype != ETHERTYPE_IP && etype != ETHERTYPE_IPV6) return 0;
 
     return base + hdr + 8;
 }
@@ -2030,23 +2061,25 @@ static size_t live_l3_offset(int link_type, const u_char* packet, size_t caplen)
             etype = ntohs(*reinterpret_cast<const uint16_t*>(packet + off + 2));
             off += 4;
         }
-        return etype == ETHERTYPE_IP ? off : 0;
+        return (etype == ETHERTYPE_IP || etype == ETHERTYPE_IPV6) ? off : 0;
     }
     if (link_type == DLT_RAW) return 0;
     if (link_type == DLT_LINUX_SLL) {
         if (caplen < 16) return 0;
         uint16_t etype = ntohs(*reinterpret_cast<const uint16_t*>(packet + 14));
-        return etype == ETHERTYPE_IP ? 16 : 0;
+        return (etype == ETHERTYPE_IP || etype == ETHERTYPE_IPV6) ? 16 : 0;
     }
     if (link_type == DLT_LINUX_SLL2) {
         if (caplen < 20) return 0;
         uint16_t etype = ntohs(*reinterpret_cast<const uint16_t*>(packet));
-        return etype == ETHERTYPE_IP ? 20 : 0;
+        return (etype == ETHERTYPE_IP || etype == ETHERTYPE_IPV6) ? 20 : 0;
     }
     if (link_type == DLT_NULL || link_type == DLT_LOOP) {
         if (caplen < 4) return 0;
         uint32_t family = *reinterpret_cast<const uint32_t*>(packet);
-        return (family == 2) ? 4 : 0;
+        // AF_INET=2; AF_INET6=10 (Linux), 28 (FreeBSD), 30 (macOS)
+        if (family == 2 || family == 10 || family == 28 || family == 30) return 4;
+        return 0;
     }
     // Raw 802.11 frames (no radiotap header).
     if (link_type == DLT_IEEE802_11) {
@@ -2062,46 +2095,84 @@ static size_t live_l3_offset(int link_type, const u_char* packet, size_t caplen)
     }
     if (caplen >= sizeof(ether_header)) {
         const ether_header* eth = reinterpret_cast<const ether_header*>(packet);
-        return ntohs(eth->ether_type) == ETHERTYPE_IP ? sizeof(ether_header) : 0;
+        uint16_t et = ntohs(eth->ether_type);
+        return (et == ETHERTYPE_IP || et == ETHERTYPE_IPV6) ? sizeof(ether_header) : 0;
     }
     return 0;
 }
 
 // Parse a libpcap-captured frame into the same layout the unix-socket path
-// receives. Returns false on non-IPv4 / truncated / unsupported frames.
+// receives. Handles both IPv4 and IPv6. Returns false on unsupported frames.
 static bool live_parse_packet(int link_type, const u_char* packet, uint32_t caplen,
                               uint64_t timestamp_us, size_t max_payload,
                               PacketMessage& out, const uint8_t*& payload_out) {
     size_t off = live_l3_offset(link_type, packet, caplen);
     if (off == 0 && link_type != DLT_RAW) return false;
-    if (caplen < off + sizeof(ip)) return false;
+    if (caplen < off + 1) return false;
 
-    const ip* iph = reinterpret_cast<const ip*>(packet + off);
-    if (iph->ip_v != 4) return false;
-    size_t ip_hl = static_cast<size_t>(iph->ip_hl) * 4;
-    if (ip_hl < 20 || caplen < off + ip_hl) return false;
-
+    const uint8_t ip_ver = (packet[off] >> 4) & 0x0F;
     out = PacketMessage{};
     out.timestamp_us = timestamp_us;
-    out.src_ip   = iph->ip_src.s_addr;
-    out.dst_ip   = iph->ip_dst.s_addr;
-    out.protocol = iph->ip_p;
-    out.packet_len = ntohs(iph->ip_len);
 
-    const uint8_t* l4 = packet + off + ip_hl;
-    size_t l4_avail = caplen - (off + ip_hl);
-    if (out.protocol == IPPROTO_TCP && l4_avail >= sizeof(tcphdr)) {
+    const uint8_t* l4 = nullptr;
+    size_t l4_avail = 0;
+
+    if (ip_ver == 4) {
+        if (caplen < off + sizeof(ip)) return false;
+        const ip* iph = reinterpret_cast<const ip*>(packet + off);
+        const size_t ip_hl = static_cast<size_t>(iph->ip_hl) * 4;
+        if (ip_hl < 20 || caplen < off + ip_hl) return false;
+
+        std::memset(out.src_ip, 0, 16);
+        std::memset(out.dst_ip, 0, 16);
+        std::memcpy(out.src_ip, &iph->ip_src.s_addr, 4);
+        std::memcpy(out.dst_ip, &iph->ip_dst.s_addr, 4);
+        out.protocol   = iph->ip_p;
+        out.ip_version = 4;
+        out.packet_len = ntohs(iph->ip_len);
+        l4             = packet + off + ip_hl;
+        l4_avail       = caplen - (off + ip_hl);
+
+    } else if (ip_ver == 6) {
+        if (caplen < off + 40) return false;
+        const ip6_hdr* ip6h = reinterpret_cast<const ip6_hdr*>(packet + off);
+
+        std::memcpy(out.src_ip, &ip6h->ip6_src, 16);
+        std::memcpy(out.dst_ip, &ip6h->ip6_dst, 16);
+        out.ip_version = 6;
+        out.packet_len = static_cast<uint16_t>(40 + ntohs(ip6h->ip6_plen));
+
+        uint8_t next_hdr = ip6h->ip6_nxt;
+        size_t ext_off   = off + 40;
+        while (next_hdr == 0 || next_hdr == 43 || next_hdr == 60) {
+            if (caplen < ext_off + 2) return false;
+            const uint8_t* ext = packet + ext_off;
+            next_hdr  = ext[0];
+            ext_off  += (static_cast<size_t>(ext[1]) + 1) * 8;
+            if (ext_off > caplen) return false;
+        }
+        if (next_hdr == 44 || next_hdr == 59) return false;
+
+        out.protocol = next_hdr;
+        l4           = (ext_off < caplen) ? packet + ext_off : nullptr;
+        l4_avail     = (ext_off < caplen) ? caplen - ext_off : 0;
+
+    } else {
+        return false;
+    }
+
+    if (out.protocol == IPPROTO_TCP && l4 && l4_avail >= sizeof(tcphdr)) {
         const tcphdr* th = reinterpret_cast<const tcphdr*>(l4);
         out.src_port = ntohs(th->th_sport);
         out.dst_port = ntohs(th->th_dport);
-    } else if (out.protocol == IPPROTO_UDP && l4_avail >= sizeof(udphdr)) {
+    } else if (out.protocol == IPPROTO_UDP && l4 && l4_avail >= sizeof(udphdr)) {
         const udphdr* uh = reinterpret_cast<const udphdr*>(l4);
         out.src_port = ntohs(uh->uh_sport);
         out.dst_port = ntohs(uh->uh_dport);
     }
 
     payload_out = packet + off;
-    size_t snap = caplen - off;
+    const size_t snap = caplen - off;
     out.payload_len = static_cast<uint16_t>(snap < max_payload ? snap : max_payload);
     return true;
 }

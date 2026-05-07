@@ -25,7 +25,7 @@ function buildWhere(params, tablePrefix = '') {
   if (params.start) { clauses.push(`${p}start_time >= ?`); values.push(params.start); }
   if (params.end)   { clauses.push(`${p}end_time <= ?`);   values.push(params.end); }
   if (params.application) { clauses.push(`${p}application LIKE ?`); values.push(`%${params.application}%`); }
-  if (params.category)    { clauses.push(`${p}application_category = ?`); values.push(params.category); }
+  if (params.category)    { clauses.push('am.category = ?'); values.push(params.category); }
   if (params.src_ip)  { clauses.push(`${p}src_ip = ?`);  values.push(params.src_ip); }
   if (params.dst_ip)  { clauses.push(`${p}dst_ip = ?`);  values.push(params.dst_ip); }
   if (params.ip)      { clauses.push(`(${p}src_ip = ? OR ${p}dst_ip = ?)`); values.push(params.ip, params.ip); }
@@ -39,13 +39,12 @@ function buildWhere(params, tablePrefix = '') {
   }
   // classified=true → known business apps; classified=false → unknown/raw protocols
   if (params.classified === 'true') {
-    const raw = [...RAW_PROTOCOLS].filter(Boolean).map(() => '?').join(',');
-    clauses.push(`(${p}application IS NOT NULL AND ${p}application NOT IN (${[...RAW_PROTOCOLS].filter(Boolean).map(() => '?').join(',')}) AND ${p}application_category IS NOT NULL AND ${p}application_category != 'Unspecified')`);
-    values.push(...[...RAW_PROTOCOLS].filter(Boolean));
+    const rawList = [...RAW_PROTOCOLS].filter(Boolean);
+    clauses.push(`(${p}application IS NOT NULL AND ${p}application NOT IN (${rawList.map(() => '?').join(',')}) AND am.category IS NOT NULL AND am.category != 'Unspecified')`);
+    values.push(...rawList);
   } else if (params.classified === 'false') {
     const rawList = [...RAW_PROTOCOLS].filter(Boolean);
-    const placeholders = rawList.map(() => '?').join(',');
-    clauses.push(`(${p}application IS NULL OR ${p}application IN (${placeholders}) OR ${p}application_category IS NULL OR ${p}application_category = 'Unspecified')`);
+    clauses.push(`(${p}application IS NULL OR ${p}application IN (${rawList.map(() => '?').join(',')}) OR am.category IS NULL OR am.category = 'Unspecified')`);
     values.push(...rawList);
   }
 

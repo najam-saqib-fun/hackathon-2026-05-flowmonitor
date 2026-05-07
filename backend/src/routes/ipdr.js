@@ -61,9 +61,14 @@ router.get('/:id/flows', requireAuth, async (req, res) => {
              f.application, f.start_time, f.end_time, f.flow_duration_ms,
              f.packet_sent, f.packet_recv, f.bytes_sent, f.bytes_recv,
              f.total_packets, f.total_bytes, f.hostnames, f.urls, f.metadata,
-             COALESCE(s.subscriber_id, 'unknown') as subscriber_id
+             COALESCE(s.subscriber_id, 'unknown') as subscriber_id,
+             COALESCE(am.category, '') as application_category
       FROM flows f
       LEFT JOIN subscribers s ON s.ip_address = f.src_ip
+      LEFT JOIN (
+        SELECT application, MIN(category) AS category
+        FROM application_mappings GROUP BY application
+      ) am ON am.application = f.application
       WHERE f.ipdr_key_id = ?
       ORDER BY f.start_time DESC
       LIMIT 500

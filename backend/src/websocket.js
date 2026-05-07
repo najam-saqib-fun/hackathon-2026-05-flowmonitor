@@ -2,7 +2,7 @@ const WebSocket = require('ws');
 const { verifyToken } = require('./auth');
 const { query } = require('./db');
 
-const PUSH_INTERVAL_MS = parseInt(process.env.WS_PUSH_INTERVAL_MS || '3000');
+const PUSH_INTERVAL_MS = parseInt(process.env.WS_PUSH_INTERVAL_MS || '15000');
 
 function createWsServer(server) {
   const wss = new WebSocket.Server({ server, path: '/ws' });
@@ -56,22 +56,30 @@ function createWsServer(server) {
                      (SELECT COUNT(*) FROM flows WHERE updated_at >= NOW() - INTERVAL 60 SECOND) as flows_last_60s,
                      (SELECT COALESCE(SUM(total_bytes), 0) FROM flows WHERE updated_at >= NOW() - INTERVAL 60 SECOND) as bytes_last_60s
               FROM flows
-              WHERE start_time >= NOW() - INTERVAL 1 HOUR
             `),
             query(`
-              SELECT application, SUM(total_bytes) as bytes, COUNT(*) as flows
-              FROM flows
-              WHERE start_time >= NOW() - INTERVAL 5 MINUTE
-              GROUP BY application
-              ORDER BY bytes DESC
+              SELECT a.application,
+                     COALESCE(am.category, a.category, '') AS category,
+                     a.total_flows AS flows,
+                     (a.total_bytes_sent + a.total_bytes_recv) AS total_bytes
+              FROM applications_summary a
+              LEFT JOIN (
+                SELECT application, MIN(category) AS category
+                FROM application_mappings GROUP BY application
+              ) am ON am.application = a.application
+              ORDER BY total_bytes DESC
               LIMIT 10
             `),
             query(`
-              SELECT src_ip as ip, SUM(total_bytes) as bytes, COUNT(*) as flows
-              FROM flows
-              WHERE start_time >= NOW() - INTERVAL 5 MINUTE
-              GROUP BY src_ip
-              ORDER BY bytes DESC
+              SELECT f.src_ip AS ip,
+                     SUM(f.total_bytes) AS total_bytes,
+                     COUNT(*) AS flows,
+                     COALESCE(s.subscriber_id, 'unknown') AS subscriber_id,
+                     COALESCE(s.name, '') AS subscriber_name
+              FROM flows f
+              LEFT JOIN subscribers s ON s.ip_address = f.src_ip
+              GROUP BY f.src_ip, s.subscriber_id, s.name
+              ORDER BY total_bytes DESC
               LIMIT 10
             `),
           ]);
@@ -168,6 +176,22 @@ function createWsServer(server) {
           );
           value = row?.val || 0;
           triggered = value > rule.threshold;
+
+        } else if (rule.metric === 'unusual_port') {
+          // Count flows to destination ports outside common well-known ranges
+          const [row] = await query(
+            `SELECT COUNT(*) as val
+             FROM flows
+             WHERE start_time >= NOW() - INTERVAL ? SECOND
+               AND dst_port NOT IN (
+                 20,21,22,23,25,53,67,68,80,110,143,161,443,465,587,
+                 993,995,3306,3389,5432,8080,8443
+               )
+               AND dst_port > ?`,
+            [win, rule.threshold]
+          );
+          value = row?.val || 0;
+          triggered = value > 0;
         }
 
         if (triggered) {

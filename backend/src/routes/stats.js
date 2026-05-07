@@ -64,12 +64,17 @@ router.get('/top-apps', requireAuth, async (req, res) => {
                 ? req.query.by : 'total_bytes';
 
     const rows = await query(
-      `SELECT application, category,
-              total_flows, total_bytes_sent, total_bytes_recv,
-              (total_bytes_sent + total_bytes_recv) as total_bytes,
-              total_packets_sent, total_packets_recv,
-              first_seen, last_seen
-       FROM applications_summary
+      `SELECT a.application,
+              COALESCE(am.category, a.category, '') AS category,
+              a.total_flows, a.total_bytes_sent, a.total_bytes_recv,
+              (a.total_bytes_sent + a.total_bytes_recv) AS total_bytes,
+              a.total_packets_sent, a.total_packets_recv,
+              a.first_seen, a.last_seen
+       FROM applications_summary a
+       LEFT JOIN (
+         SELECT application, MIN(category) AS category
+         FROM application_mappings GROUP BY application
+       ) am ON am.application = a.application
        ORDER BY ${by} DESC
        LIMIT ?`,
       [limit]
@@ -86,28 +91,40 @@ router.get('/top-talkers', requireAuth, async (req, res) => {
     const { where, vals } = timeRange(req.query);
     const limit = Math.min(parseInt(req.query.limit || '20'), 100);
 
+    // Build time range clauses with explicit table prefix
+    const tClauses = [];
+    const tVals = [];
+    if (req.query.start) { tClauses.push('f.start_time >= ?'); tVals.push(req.query.start); }
+    if (req.query.end)   { tClauses.push('f.end_time <= ?');   tVals.push(req.query.end); }
+    const tWhere = tClauses.length ? 'WHERE ' + tClauses.join(' AND ') : '';
+
     const [sources, destinations] = await Promise.all([
       query(
-        `SELECT src_ip as ip, COUNT(*) as flows,
-                SUM(bytes_sent) as bytes_sent,
-                SUM(bytes_recv) as bytes_recv,
-                SUM(total_bytes) as total_bytes
-         FROM flows ${where}
-         GROUP BY src_ip
+        `SELECT f.src_ip AS ip, COUNT(*) AS flows,
+                SUM(f.bytes_sent) AS bytes_sent,
+                SUM(f.bytes_recv) AS bytes_recv,
+                SUM(f.total_bytes) AS total_bytes,
+                COALESCE(s.subscriber_id, 'unknown') AS subscriber_id,
+                COALESCE(s.name, '') AS subscriber_name
+         FROM flows f
+         LEFT JOIN subscribers s ON s.ip_address = f.src_ip
+         ${tWhere}
+         GROUP BY f.src_ip, s.subscriber_id, s.name
          ORDER BY total_bytes DESC
          LIMIT ?`,
-        [...vals, limit]
+        [...tVals, limit]
       ),
       query(
-        `SELECT dst_ip as ip, COUNT(*) as flows,
-                SUM(bytes_recv) as bytes_recv,
-                SUM(bytes_sent) as bytes_sent,
-                SUM(total_bytes) as total_bytes
-         FROM flows ${where}
-         GROUP BY dst_ip
+        `SELECT f.dst_ip AS ip, COUNT(*) AS flows,
+                SUM(f.bytes_recv) AS bytes_recv,
+                SUM(f.bytes_sent) AS bytes_sent,
+                SUM(f.total_bytes) AS total_bytes
+         FROM flows f
+         ${tWhere}
+         GROUP BY f.dst_ip
          ORDER BY total_bytes DESC
          LIMIT ?`,
-        [...vals, limit]
+        [...tVals, limit]
       ),
     ]);
     res.json({ sources, destinations });
@@ -266,11 +283,16 @@ router.get('/app-detection', requireAuth, async (req, res) => {
       query("SELECT COUNT(*) as total FROM flows WHERE start_time >= NOW() - INTERVAL 1 DAY"),
       query("SELECT COUNT(*) as cnt FROM flows WHERE (application IS NULL OR application IN ('Unknown','')) AND start_time >= NOW() - INTERVAL 1 DAY"),
       query(`
-        SELECT application_category as category, COUNT(*) as flows,
-               SUM(total_bytes) as bytes
-        FROM flows
-        WHERE start_time >= NOW() - INTERVAL 1 DAY
-        GROUP BY application_category
+        SELECT COALESCE(am.category, 'Unclassified') AS category,
+               COUNT(*) AS flows,
+               SUM(f.total_bytes) AS bytes
+        FROM flows f
+        LEFT JOIN (
+          SELECT application, MIN(category) AS category
+          FROM application_mappings GROUP BY application
+        ) am ON am.application = f.application
+        WHERE f.start_time >= NOW() - INTERVAL 1 DAY
+        GROUP BY am.category
         ORDER BY flows DESC
       `),
     ]);

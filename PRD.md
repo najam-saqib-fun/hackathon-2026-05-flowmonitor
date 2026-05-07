@@ -165,9 +165,26 @@ FlowMon is a three-tier ISP traffic analytics platform:
 
 ---
 
+### 12. IPv6 Support
+
+**What it does:** Both `pcap_processor` and `flow_monitor` now parse IPv4 and IPv6 packets. YouTube streaming traffic (QUIC/UDP over IPv6 to Google's `2a00:1450:4019::/32`) is fully captured.
+
+**Technical changes:**
+- `PacketMessage` struct in `common.h` changed from `uint32_t src_ip/dst_ip` to `uint8_t src_ip[16]/dst_ip[16]` plus `uint8_t ip_version`. Struct size: 25 → 50 bytes.
+- `pcap_processor`: `l3_offset()` now accepts both `ETHERTYPE_IP` (0x0800) and `ETHERTYPE_IPV6` (0x86DD). Main loop peeks at the IP version nibble and uses `ip6_hdr` for IPv6 frames; walks extension headers (HopByHop, Routing, Destination) to reach the transport layer.
+- `flow_monitor`: `live_l3_offset()` and `live_parse_packet()` updated identically. `ip_bytes_to_str(bytes, version)` replaces `ipv4_to_str()`. Direction detection uses `memcmp` on 16-byte arrays. CIDR lookup gated to IPv4 flows only.
+
+**Bugs fixed:**
+- **IPDR keys closing during long YouTube sessions** — `sync_active()` now refreshes `ipdr_keys_[lk].last_seen_us = now_us` for every active flow on each sync cycle. Previously the key's timestamp was only updated when a flow *expired*, so a continuously active flow never bumped it and the key closed after 60 s of no *finalizations*.
+
+**Result:** Before: `mytraffic.pcap` (3527 packets, 91% IPv6) → only ~309 sent. After: **3525 sent**. `mytraffic1.pcap` (13852 packets, 85% IPv6): **13846 sent**.
+
+---
+
 ## Known Constraints
 
 - nDPI **5.x only** — `struct ndpi_proto` was reshaped in v5; not compatible with nDPI 4.x
 - WPA2 unicast traffic is encrypted at L2; `--rfmon` mode only decodes unencrypted 802.11 frames
 - `total_packets` and `total_bytes` in `flows` are MySQL `GENERATED ALWAYS AS ... STORED` columns — never write to them directly
 - `capture_policy` empty = capture all; adding the first row switches to strict allowlist mode
+- IPv6 CIDR-based application mapping not yet supported — only hostname suffix and exact-IP lookups work for IPv6 flows. YouTube is identified via TLS SNI (`googlevideo.com`) extracted by nDPI.

@@ -17,6 +17,10 @@ import { TimeFilterComponent, TimeFilter } from '../../shared/time-filter/time-f
 Chart.register(...registerables);
 
 function fmtBytes(b: number): string {
+  console.log('fmtBytes', b, typeof b);
+  if(typeof b !== 'number') {
+    b = Number(b);
+  };
   if (!b) return '0 B';
   if (b >= 1e9) return (b / 1e9).toFixed(2) + ' GB';
   if (b >= 1e6) return (b / 1e6).toFixed(2) + ' MB';
@@ -34,6 +38,8 @@ function fmtApp(app: string, hostnames: string | null | undefined): string {
   return app;
 }
 
+const BW_REFRESH_MS = 15_000;
+
 @Component({
   selector: 'app-dashboard',
   standalone: true,
@@ -43,13 +49,49 @@ function fmtApp(app: string, hostnames: string | null | undefined): string {
     MatSlideToggleModule, MatProgressBarModule, MatTooltipModule,
     BaseChartDirective, TimeFilterComponent,
   ],
+  styles: [`
+    .dash-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .dash-toggles {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .two-col-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .chart-wrap {
+      position: relative;
+      height: 260px;
+      width: 100%;
+    }
+    .chart-wrap canvas {
+      position: absolute;
+      inset: 0;
+    }
+  `],
   template: `
-    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;margin-bottom:1rem;">
+    <div class="dash-header">
       <div class="page-header" style="margin:0;">
         <span class="live-dot"></span>Real-time Dashboard
       </div>
-      <!-- Pause/Resume -->
-      <div style="display:flex;align-items:center;gap:0.75rem;">
+      <div class="dash-toggles">
         <mat-slide-toggle
           [checked]="!ws.paused()"
           (change)="ws.toggle()"
@@ -57,7 +99,6 @@ function fmtApp(app: string, hostnames: string | null | undefined): string {
           style="font-size:0.85rem;">
           {{ ws.paused() ? 'Paused' : 'Live' }}
         </mat-slide-toggle>
-        <!-- Unknown filter -->
         <mat-slide-toggle
           [checked]="showUnknown()"
           (change)="showUnknown.set($event.checked)"
@@ -83,28 +124,32 @@ function fmtApp(app: string, hostnames: string | null | undefined): string {
     </div>
 
     <!-- Charts row -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem;">
+    <div class="charts-grid">
       <div class="chart-card">
         <div class="card-title">Bandwidth Over Time</div>
-        <canvas baseChart [data]="bwChartData" [options]="lineOpts" type="line"></canvas>
+        <div class="chart-wrap">
+          <canvas baseChart [data]="bwChartData" [options]="lineOpts" type="line"></canvas>
+        </div>
       </div>
       <div class="chart-card">
         <div class="card-title">Protocol Distribution</div>
-        <canvas baseChart [data]="protoChartData" [options]="doughnutOpts" type="doughnut"></canvas>
+        <div class="chart-wrap">
+          <canvas baseChart [data]="protoChartData" [options]="doughnutOpts" type="doughnut"></canvas>
+        </div>
       </div>
     </div>
 
     <!-- Top apps + Top talkers -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem;">
+    <div class="two-col-grid">
       <div class="card">
         <div class="card-title">Top Applications</div>
-        <div *ngFor="let app of topApps(); let i = index" style="margin-bottom:0.75rem;">
+        <div *ngFor="let app of filteredTopApps(); let i = index" style="margin-bottom:0.75rem;">
           <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:3px;">
-            <span style="font-weight:500;">
+            <span style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%;">
               {{ app.application || 'Unknown' }}
               <span *ngIf="isUnclassified(app)" style="color:#f59e0b;font-size:0.75rem;">(unclassified)</span>
             </span>
-            <span style="color:#94a3b8;">{{ fmtBytes(app.bytes || app.total_bytes || 0) }}</span>
+            <span style="color:#94a3b8;flex-shrink:0;margin-left:0.5rem;">{{ fmtBytes(app.bytes || app.total_bytes || 0) }}</span>
           </div>
           <mat-progress-bar mode="determinate" [value]="appPct(app)" color="accent"
             style="border-radius:4px;height:4px;"></mat-progress-bar>
@@ -113,7 +158,7 @@ function fmtApp(app: string, hostnames: string | null | undefined): string {
         <div *ngIf="!filteredTopApps().length" style="color:#475569;font-size:0.85rem;">No data</div>
       </div>
 
-      <div class="card">
+      <div class="card" style="overflow:auto;">
         <div class="card-title">Top Talkers (Source IPs)</div>
         <table mat-table [dataSource]="topTalkers()" style="width:100%;background:transparent;">
           <ng-container matColumnDef="ip">
@@ -136,16 +181,16 @@ function fmtApp(app: string, hostnames: string | null | undefined): string {
 
     <!-- Live flows table -->
     <div class="card">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;">
         <span class="card-title" style="margin:0;">
           Live Flows <span class="live-dot" style="margin-left:8px;"></span>
         </span>
         <span style="color:#475569;font-size:0.75rem;">
-          {{ ws.paused() ? '⏸ Updates paused' : 'Auto-refreshes every 3s' }}
+          {{ ws.paused() ? '⏸ Updates paused' : 'Auto-refreshes every 15s' }}
         </span>
       </div>
       <div style="overflow-x:auto;">
-        <table mat-table [dataSource]="filteredLiveFlows()" style="width:100%;background:transparent;min-width:900px;">
+        <table mat-table [dataSource]="filteredLiveFlows()" style="width:100%;background:transparent;min-width:700px;">
           <ng-container matColumnDef="src">
             <th mat-header-cell *matHeaderCellDef style="color:#64748b;">Source</th>
             <td mat-cell *matCellDef="let f" style="font-size:0.8rem;">
@@ -194,6 +239,7 @@ export class DashboardComponent implements OnInit, OnDestroy {
   private api = inject(ApiService);
   ws = inject(WebSocketService);
   private sub?: Subscription;
+  private bwTimer?: ReturnType<typeof setInterval>;
 
   kpis       = signal<any[]>([]);
   _topApps   = signal<any[]>([]);
@@ -246,17 +292,22 @@ export class DashboardComponent implements OnInit, OnDestroy {
 
   doughnutOpts: ChartConfiguration['options'] = {
     responsive: true, maintainAspectRatio: false,
-    plugins: { legend: { position: 'right', labels: { color: '#94a3b8', boxWidth: 12 } } },
+    plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8', boxWidth: 12, padding: 12 } } },
   };
 
   ngOnInit() {
     this.loadAll();
+    this.loadBandwidth();
+    this.bwTimer = setInterval(() => this.loadBandwidth(), BW_REFRESH_MS);
     this.sub = this.ws.message$.subscribe(msg => {
       if (msg?.type === 'live_update') this.applyUpdate(msg.data);
     });
   }
 
-  ngOnDestroy() { this.sub?.unsubscribe(); }
+  ngOnDestroy() {
+    this.sub?.unsubscribe();
+    clearInterval(this.bwTimer);
+  }
 
   onFilterChange(f: TimeFilter) {
     this.activeFilter.set(f);
@@ -276,12 +327,6 @@ export class DashboardComponent implements OnInit, OnDestroy {
     });
     this.api.getTopTalkers({ ...p, limit: 8 }).subscribe(d => this.topTalkers.set(d.sources || []));
     this.api.getLiveFlows(3600).subscribe(d => this._liveFlows.set(d));
-    this.api.getBandwidth('minute', 30).subscribe(d => {
-      this.bwChartData = {
-        labels: d.map((r: any) => r.bucket?.slice(11, 16) || ''),
-        datasets: [{ ...this.bwChartData.datasets[0], data: d.map((r: any) => r.bytes || 0) }],
-      };
-    });
     this.api.getProtocolDist(p).subscribe(d => {
       const tcp  = d.find((r: any) => r.protocol === 6)?.bytes  || 0;
       const udp  = d.find((r: any) => r.protocol === 17)?.bytes || 0;
@@ -291,9 +336,21 @@ export class DashboardComponent implements OnInit, OnDestroy {
     });
   }
 
+  private loadBandwidth() {
+    this.api.getBandwidth('minute', 30).subscribe(d => {
+      this.bwChartData = {
+        labels: d.map((r: any) => r.bucket?.slice(11, 16) || ''),
+        datasets: [{ ...this.bwChartData.datasets[0], data: d.map((r: any) => r.bytes || 0) }],
+      };
+    });
+  }
+
   private applyUpdate(data: any) {
     if (data.live_flows)  this._liveFlows.set(data.live_flows);
-    if (data.top_apps)    { this._topApps.set(data.top_apps); this.maxAppBytes = Math.max(...data.top_apps.map((r: any) => r.bytes || 0), 1); }
+    if (data.top_apps)    {
+      this._topApps.set(data.top_apps);
+      this.maxAppBytes = Math.max(...data.top_apps.map((r: any) => r.total_bytes || r.bytes || 0), 1);
+    }
     if (data.top_talkers) this.topTalkers.set(data.top_talkers);
     if (data.overview)    this.updateKpis(data.overview);
   }

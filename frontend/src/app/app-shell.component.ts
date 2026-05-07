@@ -49,7 +49,7 @@ interface NavItem { label: string; icon: string; path: string; }
         </div>
       </mat-sidenav>
 
-      <mat-sidenav-content class="sidenav-content" style="padding:1.5rem 2rem;overflow:auto;">
+      <mat-sidenav-content class="sidenav-content" style="padding:1.25rem 1.5rem;overflow:auto;">
         <router-outlet />
       </mat-sidenav-content>
     </mat-sidenav-container>

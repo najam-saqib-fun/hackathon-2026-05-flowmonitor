@@ -9,7 +9,7 @@
     "mysql_socket": "",
 
     "flow_timeout_seconds": 60,
-    "ndpi_max_packets": 16,
+    "ndpi_max_packets": 64,
     "sweep_every_packets": 1000,
     "max_active_flows": 100000
 }

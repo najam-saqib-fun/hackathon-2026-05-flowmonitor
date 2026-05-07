@@ -106,10 +106,12 @@ sudo ./build/flow_monitor --interface wlp1s0 --rfmon ...
 `src/common.h` defines the wire format — a length-prefixed binary stream over `AF_UNIX`:
 
 ```
-[uint32_t body_len][PacketMessage 25-byte header][payload of payload_len bytes]
+[uint32_t body_len][PacketMessage 50-byte header][payload of payload_len bytes]
 ```
 
-`PacketMessage` is packed (no padding): `timestamp_us`(8) + `src_ip`(4) + `dst_ip`(4) + `src_port`(2) + `dst_port`(2) + `protocol`(1) + `packet_len`(2) + `payload_len`(2) = 25 bytes. EOF sentinel is `body_len = 0`.
+`PacketMessage` is packed (no padding): `timestamp_us`(8) + `src_ip[16]`(16) + `dst_ip[16]`(16) + `src_port`(2) + `dst_port`(2) + `protocol`(1) + `ip_version`(1) + `packet_len`(2) + `payload_len`(2) = 50 bytes. EOF sentinel is `body_len = 0`.
+
+IPv4 addresses occupy the first 4 bytes of the 16-byte `src_ip`/`dst_ip` fields (rest zero). IPv6 uses all 16 bytes. `ip_version` is 4 or 6.
 
 `pcap_processor` passes the IP layer onwards (not raw L2). `flow_monitor`'s nDPI call also receives from the IP header — `ndpi_detection_process_packet` expects `payload = packet + ip_header_offset`.
 
@@ -119,19 +121,20 @@ sudo ./build/flow_monitor --interface wlp1s0 --rfmon ...
 
 Key classes all live in `src/flow_monitor.cpp`:
 
-- **`AppMappings`** — loaded once from `application_mappings` table; holds exact hosts, suffix hosts, exact IPs, and CIDR ranges. Called in `apply_mapping_override()` after nDPI classification to override `flow.application`.
+- **`AppMappings`** — loaded once from `application_mappings` table; holds exact hosts, suffix hosts, exact IPs, and CIDR ranges (IPv4 only). Called in `apply_mapping_override()` after nDPI classification to override `flow.application`.
 - **`NdpiContext`** — wraps `ndpi_init_detection_module`. One global instance; `flow_struct_size()` used for `calloc` of per-flow nDPI state.
 - **`FlowDB`** — all MySQL I/O. `open()` connects, runs `create_schema()`, and `seed_app_mappings()` on startup. Uses `CLIENT_MULTI_STATEMENTS`; `exec()` must drain all result sets.
 - **`FlowTracker`** — the core loop. `on_packet()` → `lookup_or_create()` → `run_ndpi()` → periodic `sweep_expired()` and `sync_active()`. Flows are keyed by canonical 5-tuple (smaller IP first, ties by port) to make both directions share one entry.
 
 **Flow lifecycle:**
-1. First packet → `lookup_or_create` allocates `Flow` with `calloc`'d `ndpi_flow_struct`.
-2. Each packet → `run_ndpi` feeds nDPI. Metadata only read from `protos.tls_quic` when `proto_is_tls_family()` is true — the `protos` union aliases DNS/other bytes to TLS `char*` pointers; reading them on non-TLS flows causes SIGSEGV.
-3. After `ndpi_max_packets` (default 16) or protocol decided → `ndpi_detection_giveup`, `finalize_protocol`, `apply_mapping_override`.
-4. Every `sweep_every_packets` (default 1000) → `sweep_expired` finalizes flows idle > `flow_timeout_seconds`. `finalize_and_persist` assigns IPDR keys; takes `now_us` so `ipdr_keys_[lk].last_seen_us = now_us` (not `f.last_packet_time_us`) preventing immediate re-expiry.
-5. Every `sync_interval_seconds` (wall clock) → `sync_active` upserts active flows to DB for live visibility.
+1. First packet → `lookup_or_create` allocates `Flow` with `calloc`'d `ndpi_flow_struct`. `ip_bytes_to_str(m.src_ip, m.ip_version)` converts the raw address bytes to a string for map key and DB storage.
+2. Direction detection uses `memcmp(m.src_ip, f->src_ip_bytes, 16)` to handle both IPv4 and IPv6.
+3. Each packet → `run_ndpi` feeds nDPI. Metadata only read from `protos.tls_quic` when `proto_is_tls_family()` is true — the `protos` union aliases DNS/other bytes to TLS `char*` pointers; reading them on non-TLS flows causes SIGSEGV.
+4. After `ndpi_max_packets` (default 16) or protocol decided → `ndpi_detection_giveup`, `finalize_protocol`, `apply_mapping_override`. CIDR lookups only run for IPv4 flows (all seeded CIDRs are IPv4).
+5. Every `sweep_every_packets` (default 1000) → `sweep_expired` finalizes flows idle > `flow_timeout_seconds`. `finalize_and_persist` assigns IPDR keys; takes `now_us` so `ipdr_keys_[lk].last_seen_us = now_us` (not `f.last_packet_time_us`) preventing immediate re-expiry.
+6. Every `sync_interval_seconds` (wall clock) → `sync_active` upserts active flows to DB for live visibility. Also refreshes `ipdr_keys_[lk].last_seen_us = now_us` for each active flow to prevent IPDR keys from expiring during long-running sessions (e.g. YouTube streams).
 
-**IPDR key semantics:** An IPDR key represents a session: `(src_ip, dst_ip, dst_port, application)`. The in-memory map `ipdr_keys_` stores `last_seen_us = now_us` (sweep time, not packet time) so the key survives until 60 s pass with *no new flows* being finalized for it. `ipdr_update` uses `LEAST(first_seen,…)` / `GREATEST(last_seen,…)` to stay monotonic when multiple flows for the same key finalize out of order.
+**IPDR key semantics:** An IPDR key represents a session: `(src_ip, dst_ip, dst_port, application)`. The in-memory map `ipdr_keys_` stores `last_seen_us = now_us` (sweep time, not packet time) so the key survives until 60 s pass with *no new flows* being finalized for it. `sync_active()` also updates `last_seen_us` so IPDR keys stay alive while the parent flow is still active. `ipdr_update` uses `LEAST(first_seen,…)` / `GREATEST(last_seen,…)` to stay monotonic when multiple flows for the same key finalize out of order.
 
 ---
 

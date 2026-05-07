@@ -28,7 +28,7 @@ router.get('/', requireAuth, async (req, res) => {
       query(
         `SELECT h.id, h.hostname, h.flow_id, h.first_seen, h.last_seen, h.resolution_count,
                 f.src_ip, f.dst_ip, f.src_port, f.dst_port, f.protocol,
-                f.application, f.application_category,
+                f.application,
                 COALESCE(s.subscriber_id, 'unknown') as subscriber_id,
                 COALESCE(s.name, '') as subscriber_name
          FROM hostnames h
