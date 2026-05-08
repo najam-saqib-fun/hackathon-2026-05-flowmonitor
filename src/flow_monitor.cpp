@@ -318,7 +318,12 @@ static bool parse_cidr_static(const std::string& cidr, uint32_t& net_out, uint32
 //   hostname_suffix  — match if the SNI ends with ".pattern" or equals it
 //                      (so "cursor.sh" matches api2.cursor.sh but not
 //                      evilcursor.sh)
-//   ip_exact         — match a literal IPv4 dotted-quad
+//   ip_exact         — match a literal IPv4 dotted-quad (always overrides)
+//   ip_cidr          — longest-prefix match (loaded by numeric prefix DESC);
+//                      fires for unknown flows AND transport-only protocols
+//                      (QUIC/TLS/DTLS) where nDPI knows the wire format but
+//                      not the service. Hostname lookup runs first so any
+//                      SNI-bearing flow is already handled before CIDR runs.
 //
 // To add a new app, just INSERT INTO application_mappings (...) VALUES (...);
 // — the new entry is picked up the next time flow_monitor restarts.
@@ -1432,7 +1437,13 @@ public:
             "SELECT pattern_type, pattern, application, "
             "       IFNULL(category, '') "
             "FROM application_mappings "
-            "ORDER BY priority DESC, CHAR_LENGTH(pattern) DESC";
+            "ORDER BY priority DESC, "
+            // For ip_cidr, sort by numeric prefix length so /32 loads before
+            // /16 before /8 — the linear scan then finds most-specific first.
+            // CHAR_LENGTH works well for hostname suffixes (longer = more specific).
+            "CASE WHEN pattern_type = 'ip_cidr' "
+            "     THEN CAST(SUBSTRING_INDEX(pattern,'/',-1) AS UNSIGNED) "
+            "     ELSE CHAR_LENGTH(pattern) END DESC";
         if (mysql_query(conn_, sql) != 0) {
             std::fprintf(stderr, "load_app_mappings query failed: %s\n",
                          mysql_error(conn_));
@@ -1932,14 +1943,21 @@ private:
             else if (mappings_.lookup_by_ip(f.src_ip, m)) matched = true;
         }
 
-        // 3. CIDR — only when the application is still completely unidentified.
-        //    This prevents broad cloud-provider CIDRs (AWS, Azure, GCP) from
-        //    overriding specific services like PostHog or Cursor that happen to
-        //    be hosted on those platforms but should be identified by hostname.
-        //    Protocols like TLS/QUIC/HTTP that nDPI has partially identified are
-        //    excluded; truly unknown UDP/TCP flows still get CIDR attribution.
+        // 3. CIDR — applied when the application is unidentified OR when nDPI
+        //    returned a transport-layer protocol name (QUIC, TLS, DTLS) rather
+        //    than an application-layer service name.  Transport names mean
+        //    "I know the wire format but not the service" — CIDR attribution is
+        //    safe because hostname lookup (step 1) already ran first: any flow
+        //    whose SNI was extracted will have been matched there instead.
+        //    Broad cloud-provider CIDRs (AWS, GCP) still cannot override a
+        //    specific named service (PostHog, Cursor) because those flows carry
+        //    an SNI that is caught in step 1 before we reach here.
+        static auto is_transport = [](const std::string& a) {
+            return a == "QUIC" || a == "TLS" || a == "DTLS" || a == "SSL";
+        };
         if (!matched && f.ip_version == 4 &&
-            (f.application.empty() || f.application == "Unknown")) {
+            (f.application.empty() || f.application == "Unknown" ||
+             is_transport(f.application))) {
             uint32_t dst_n, src_n;
             std::memcpy(&dst_n, f.dst_ip_bytes, 4);
             std::memcpy(&src_n, f.src_ip_bytes, 4);
