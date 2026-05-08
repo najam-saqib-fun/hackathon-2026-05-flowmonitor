@@ -1,11 +1,11 @@
 {
     "socket_path": "/tmp/flow_monitor.sock",
 
-    "mysql_host": "127.0.0.1",
-    "mysql_port": 3306,
+    "mysql_host": "turntable.proxy.rlwy.net",
+    "mysql_port": 52418,
     "mysql_user": "root",
-    "mysql_pass": "Najam123!",
-    "mysql_db":   "flowmon",
+    "mysql_pass": "aFIGeglCmrhGoNVnKndBeovxwQlOSnif",
+    "mysql_db":   "railway",
     "mysql_socket": "",
 
     "flow_timeout_seconds": 60,

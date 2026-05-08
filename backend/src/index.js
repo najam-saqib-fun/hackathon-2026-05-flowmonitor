@@ -1,4 +1,8 @@
-require('dotenv').config();
+// Load environment-specific config first (.env.production / .env.development),
+// then fall back to .env for any unset vars.
+const NODE_ENV = process.env.NODE_ENV || 'development';
+require('dotenv').config({ path: `.env.${NODE_ENV}` });
+require('dotenv').config(); // fallback
 const logger    = require('./logger');
 const analytics = require('./analytics');
 const { getPool } = require('./db');
