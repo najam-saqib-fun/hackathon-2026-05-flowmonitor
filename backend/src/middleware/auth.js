@@ -21,4 +21,13 @@ function requireAdmin(req, res, next) {
   });
 }
 
-module.exports = { requireAuth, requireAdmin };
+function requireOperator(req, res, next) {
+  requireAuth(req, res, () => {
+    if (!['admin', 'operator'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Operator role or higher required' });
+    }
+    next();
+  });
+}
+
+module.exports = { requireAuth, requireAdmin, requireOperator };

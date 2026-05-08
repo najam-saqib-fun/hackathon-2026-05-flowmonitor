@@ -104,6 +104,16 @@ export class ApiService {
     return `${this.base}/subscribers/export?format=${format}`;
   }
 
+  // ── Users (admin only) ────────────────────────────────────────────────────
+  getUsers() { return this.http.get<any[]>(`${this.base}/auth/users`); }
+  createUser(u: { username: string; password: string; role: string }) {
+    return this.http.post<any>(`${this.base}/auth/users`, u);
+  }
+  updateUser(id: number, u: { username?: string; role?: string; password?: string }) {
+    return this.http.put<any>(`${this.base}/auth/users/${id}`, u);
+  }
+  deleteUser(id: number) { return this.http.delete<any>(`${this.base}/auth/users/${id}`); }
+
   // ── Capture Policy ────────────────────────────────────────────────────────
   getPolicy() { return this.http.get<any[]>(`${this.base}/policy`); }
   updatePolicyBulk(updates: { application: string; enabled: number }[]) {

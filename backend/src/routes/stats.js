@@ -58,27 +58,64 @@ router.get('/overview', requireAuth, async (req, res) => {
 // GET /api/stats/top-apps
 router.get('/top-apps', requireAuth, async (req, res) => {
   try {
-    const { where, vals } = timeRange(req.query);
     const limit = Math.min(parseInt(req.query.limit || '20'), 100);
-    const by = ['total_bytes', 'total_flows', 'total_packets_sent'].includes(req.query.by)
-                ? req.query.by : 'total_bytes';
+    const byCol = ['total_bytes', 'total_flows', 'total_packets_sent'].includes(req.query.by)
+                  ? req.query.by : 'total_bytes';
+    const start = req.query.start || null;
+    const end   = req.query.end   || null;
 
-    const rows = await query(
-      `SELECT a.application,
-              COALESCE(am.category, a.category, '') AS category,
-              a.total_flows, a.total_bytes_sent, a.total_bytes_recv,
-              (a.total_bytes_sent + a.total_bytes_recv) AS total_bytes,
-              a.total_packets_sent, a.total_packets_recv,
-              a.first_seen, a.last_seen
-       FROM applications_summary a
-       LEFT JOIN (
-         SELECT application, MIN(category) AS category
-         FROM application_mappings GROUP BY application
-       ) am ON am.application = a.application
-       ORDER BY ${by} DESC
-       LIMIT ?`,
-      [limit]
-    );
+    let rows;
+    if (start || end) {
+      // Time-filtered: aggregate directly from flows table
+      const clauses = [];
+      const vals = [];
+      if (start) { clauses.push('f.start_time >= ?'); vals.push(start); }
+      if (end)   { clauses.push('(f.end_time IS NULL OR f.end_time <= ?)'); vals.push(end); }
+      const where = 'WHERE ' + clauses.join(' AND ');
+      const byExpr = byCol === 'total_flows' ? 'COUNT(*)' :
+                     byCol === 'total_packets_sent' ? 'SUM(f.total_packets)' :
+                     'SUM(f.total_bytes)';
+      rows = await query(
+        `SELECT f.application,
+                COALESCE(am.category, '') AS category,
+                COUNT(*) AS total_flows,
+                SUM(f.bytes_sent) AS total_bytes_sent,
+                SUM(f.bytes_recv) AS total_bytes_recv,
+                SUM(f.total_bytes) AS total_bytes,
+                SUM(f.total_packets) AS total_packets_sent,
+                0 AS total_packets_recv,
+                MIN(f.start_time) AS first_seen,
+                MAX(f.end_time) AS last_seen
+         FROM flows f
+         LEFT JOIN (
+           SELECT application, MIN(category) AS category
+           FROM application_mappings GROUP BY application
+         ) am ON am.application = f.application
+         ${where}
+         GROUP BY f.application
+         ORDER BY ${byExpr} DESC
+         LIMIT ?`,
+        [...vals, limit]
+      );
+    } else {
+      // No filter: use pre-aggregated summary table (fast)
+      rows = await query(
+        `SELECT a.application,
+                COALESCE(am.category, a.category, '') AS category,
+                a.total_flows, a.total_bytes_sent, a.total_bytes_recv,
+                (a.total_bytes_sent + a.total_bytes_recv) AS total_bytes,
+                a.total_packets_sent, a.total_packets_recv,
+                a.first_seen, a.last_seen
+         FROM applications_summary a
+         LEFT JOIN (
+           SELECT application, MIN(category) AS category
+           FROM application_mappings GROUP BY application
+         ) am ON am.application = a.application
+         ORDER BY ${byCol} DESC
+         LIMIT ?`,
+        [limit]
+      );
+    }
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });

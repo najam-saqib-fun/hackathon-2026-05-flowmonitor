@@ -8,7 +8,7 @@ import { AsyncPipe, NgIf, NgFor } from '@angular/common';
 import { AuthService } from './core/services/auth.service';
 import { WebSocketService } from './core/services/websocket.service';
 
-interface NavItem { label: string; icon: string; path: string; }
+interface NavItem { label: string; icon: string; path: string; adminOnly?: boolean; }
 
 @Component({
   selector: 'app-shell',
@@ -27,10 +27,13 @@ interface NavItem { label: string; icon: string; path: string; }
         </div>
 
         <mat-nav-list>
-          <a *ngFor="let n of nav" mat-list-item [routerLink]="n.path" routerLinkActive="active-link">
-            <mat-icon matListItemIcon>{{ n.icon }}</mat-icon>
-            <span matListItemTitle>{{ n.label }}</span>
-          </a>
+          <ng-container *ngFor="let n of nav">
+            <a *ngIf="!n.adminOnly || auth.currentUser?.role === 'admin'"
+               mat-list-item [routerLink]="n.path" routerLinkActive="active-link">
+              <mat-icon matListItemIcon>{{ n.icon }}</mat-icon>
+              <span matListItemTitle>{{ n.label }}</span>
+            </a>
+          </ng-container>
         </mat-nav-list>
 
         <div style="position:absolute;bottom:1rem;left:1rem;right:1rem;">
@@ -74,6 +77,7 @@ export class AppShellComponent implements OnInit {
     { label: 'Alerts',       icon: 'notifications_active', path: '/alerts'     },
     { label: 'Policy',       icon: 'policy',               path: '/policy'      },
     { label: 'App Usage',    icon: 'bar_chart',            path: '/app-usage'   },
+    { label: 'Users',        icon: 'manage_accounts',      path: '/users',       adminOnly: true },
   ];
 
   ngOnInit() { this.ws.connect(); }

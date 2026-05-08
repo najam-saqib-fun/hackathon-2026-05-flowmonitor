@@ -155,6 +155,10 @@ async function ensureSchema(pool) {
     try {
       await conn.query("ALTER TABLE application_mappings MODIFY COLUMN pattern_type ENUM('hostname_exact','hostname_suffix','ip_exact','ip_cidr') NOT NULL");
     } catch {}
+    // Migration: add operator role to users
+    try {
+      await conn.query("ALTER TABLE users MODIFY COLUMN role ENUM('admin','operator','viewer') NOT NULL DEFAULT 'viewer'");
+    } catch {}
 
     // Seed default admin if table is empty
     const [rows] = await conn.query('SELECT COUNT(*) as c FROM users');
