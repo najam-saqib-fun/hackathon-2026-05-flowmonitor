@@ -7,7 +7,9 @@ if (process.env.POSTHOG_API_KEY && process.env.POSTHOG_HOST) {
   try {
     const { PostHog } = require('posthog-node');
     posthog = new PostHog(process.env.POSTHOG_API_KEY, {
-      host: process.env.POSTHOG_HOST || 'https://app.posthog.com',
+      host: process.env.POSTHOG_HOST || 'https://us.i.posthog.com',
+      flushAt: 1,        // send every event immediately (no batching delay)
+      flushInterval: 0,  // disable timer-based flush; rely on flushAt
     });
     logger.info('Analytics: PostHog connected', { host: process.env.POSTHOG_HOST });
   } catch (err) {
