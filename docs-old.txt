@@ -84,3 +84,4 @@ Two terminals — daemon stays up, you stream pcaps into it.
 
 
   sudo ./build/flow_monitor --interface wlp1s0 --mysql-host 127.0.0.1 --mysql-port 3306 --mysql-user flowmon --mysql-pass 'Najam123!' --mysql-db flowmon --flow-timeout 60 --sync-interval 30 --verbose
+  sudo ./build/flow_monitor --interface wlp1s0 --mysql-host turntable.proxy.rlwy.net --mysql-port 52418 --mysql-user root --mysql-pass 'aFIGeglCmrhGoNVnKndBeovxwQlOSnif' --mysql-db railway --flow-timeout 60 --sync-interval 30 --verbose

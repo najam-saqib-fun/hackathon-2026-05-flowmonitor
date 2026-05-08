@@ -1,6 +1,7 @@
 const express = require('express');
 const { query, queryOne } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
+const analytics = require('../analytics');
 
 const router = express.Router();
 
@@ -40,6 +41,7 @@ router.post('/', requireAdmin, async (req, res) => {
       'INSERT INTO subscribers (ip_address, subscriber_id, name, notes) VALUES (?, ?, ?, ?)',
       [ip_address, subscriber_id, name || null, notes || null]
     );
+    analytics.track('subscriber_created', req.user.username, { ip_address, subscriber_id });
     res.status(201).json({ id: result.insertId, ip_address, subscriber_id });
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'IP address already mapped' });
@@ -71,6 +73,7 @@ router.put('/:id', requireAdmin, async (req, res) => {
 router.delete('/:id', requireAdmin, async (req, res) => {
   try {
     await query('DELETE FROM subscribers WHERE id = ?', [req.params.id]);
+    analytics.track('subscriber_deleted', req.user.username, { subscriber_id: req.params.id });
     res.json({ message: 'Deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -115,6 +118,7 @@ router.post('/import', requireAdmin, async (req, res) => {
         }
       } catch { skipped++; }
     }
+    analytics.track('subscribers_imported', req.user.username, { format, inserted, updated, skipped, total: rows.length });
     res.json({ inserted, updated, skipped, total: rows.length });
   } catch (err) {
     res.status(500).json({ error: err.message });

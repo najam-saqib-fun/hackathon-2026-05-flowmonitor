@@ -234,10 +234,10 @@ static std::string canonical_flow_hash(const std::string& ip1, const std::string
 static std::string format_timestamp(uint64_t us) {
     time_t secs = static_cast<time_t>(us / 1000000ULL);
     struct tm tm_buf;
-    // UTC so start_time/end_time are consistent with MySQL's CURRENT_TIMESTAMP
-    // (which is also UTC).  Using localtime_r caused a timezone skew that broke
-    // all time-range queries (WHERE start_time >= NOW() - INTERVAL N SECOND).
-    gmtime_r(&secs, &tm_buf);
+    // Local time so the DATETIME(6) value matches the wall clock at capture
+    // time (tcpdump prints local time too). The column itself is timezone-
+    // naive — switching to UTC would just be a static shift.
+    localtime_r(&secs, &tm_buf);
     char out[40];
     int n = std::snprintf(out, sizeof(out),
                           "%04d-%02d-%02d %02d:%02d:%02d.%06u",
@@ -909,6 +909,9 @@ public:
 
         const char* sock = cfg.mysql_socket.empty() ? nullptr : cfg.mysql_socket.c_str();
         // Connect with no default DB so we can CREATE DATABASE first.
+        // CLIENT_MULTI_STATEMENTS is intentionally omitted: Railway's TCP proxy
+        // mishandles the multi-result protocol flags, corrupting the connection
+        // after the first sync. Each statement is sent individually instead.
         if (!mysql_real_connect(conn_,
                                 cfg.mysql_host.c_str(),
                                 cfg.mysql_user.c_str(),
@@ -916,7 +919,7 @@ public:
                                 nullptr,
                                 static_cast<unsigned>(cfg.mysql_port),
                                 sock,
-                                CLIENT_MULTI_STATEMENTS)) {
+                                0)) {
             std::fprintf(stderr, "mysql_real_connect failed: %s\n", mysql_error(conn_));
             return false;
         }
@@ -933,8 +936,12 @@ public:
         }
         db_name_ = cfg.mysql_db;
 
+        /*
+        commented out  : because the schema already exists in the repo, and we don't want to create it every time we run the program
         if (!create_schema()) return false;
         if (!seed_app_mappings()) return false;
+        
+        */
         return true;
     }
 
@@ -1216,18 +1223,15 @@ private:
                          mysql_error(conn_), sql);
             return false;
         }
-        // Some statements (e.g. CREATE DATABASE) don't return result sets, but
-        // multi-statement mode means we still need to drain to keep the
-        // connection in a usable state.
-        do {
-            MYSQL_RES* res = mysql_store_result(conn_);
-            if (res) mysql_free_result(res);
-        } while (mysql_next_result(conn_) == 0);
+        MYSQL_RES* res = mysql_store_result(conn_);
+        if (res) mysql_free_result(res);
         return true;
     }
 
     bool create_schema() {
-        const char* schema =
+        // Each statement is sent individually — CLIENT_MULTI_STATEMENTS is not
+        // used, so we cannot batch these into one mysql_query() call.
+        if (!exec(
             "CREATE TABLE IF NOT EXISTS flows ("
             "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
             "  flow_hash CHAR(32) NOT NULL,"
@@ -1258,8 +1262,10 @@ private:
             "  KEY idx_flow_ips   (src_ip, dst_ip),"
             "  KEY idx_flow_ports (src_port, dst_port),"
             "  KEY idx_flow_duration (flow_duration_ms)"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )) return false;
 
+        if (!exec(
             "CREATE TABLE IF NOT EXISTS urls ("
             "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
             "  url VARCHAR(2048) NOT NULL,"
@@ -1271,14 +1277,14 @@ private:
             "  first_seen DATETIME(6) NOT NULL,"
             "  last_seen  DATETIME(6) NOT NULL,"
             "  access_count INT UNSIGNED DEFAULT 1,"
-            // url is too long for a full-column index under InnoDB w/utf8mb4,
-            // so we use a 255-char prefix in the unique key.
             "  UNIQUE KEY idx_unique_url_flow (url(255), flow_id),"
             "  KEY idx_url_host (host),"
             "  KEY idx_url_flow (flow_id),"
             "  CONSTRAINT fk_urls_flow FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )) return false;
 
+        if (!exec(
             "CREATE TABLE IF NOT EXISTS applications_summary ("
             "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
             "  application VARCHAR(255) NOT NULL,"
@@ -1293,8 +1299,10 @@ private:
             "  last_seen  DATETIME(6),"
             "  last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
             "  UNIQUE KEY uk_application (application)"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )) return false;
 
+        if (!exec(
             "CREATE TABLE IF NOT EXISTS hostnames ("
             "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
             "  hostname VARCHAR(512) NOT NULL,"
@@ -1305,10 +1313,10 @@ private:
             "  KEY idx_hostname (hostname(255)),"
             "  KEY idx_hostname_flow (flow_id),"
             "  CONSTRAINT fk_hostnames_flow FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )) return false;
 
-            // Operator-editable mapping table. Rows added by hand survive
-            // restarts (we only INSERT IGNORE the seed set).
+        if (!exec(
             "CREATE TABLE IF NOT EXISTS application_mappings ("
             "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
             "  pattern_type ENUM('hostname_exact','hostname_suffix','ip_exact','ip_cidr') NOT NULL,"
@@ -1320,8 +1328,10 @@ private:
             "  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
             "  UNIQUE KEY uk_pattern (pattern_type, pattern),"
             "  KEY idx_app (application)"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )) return false;
 
+        if (!exec(
             "CREATE TABLE IF NOT EXISTS ipdr_keys ("
             "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
             "  key_string VARCHAR(512) NOT NULL,"
@@ -1339,8 +1349,10 @@ private:
             "  KEY idx_lookup (src_ip, dst_ip, dst_port, application(64), status),"
             "  KEY idx_status (status),"
             "  KEY idx_last_seen (last_seen)"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )) return false;
 
+        if (!exec(
             "CREATE TABLE IF NOT EXISTS protocol_metadata ("
             "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
             "  flow_id BIGINT UNSIGNED NOT NULL,"
@@ -1355,23 +1367,21 @@ private:
             "  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
             "  KEY idx_flow (flow_id),"
             "  CONSTRAINT fk_pm_flow FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )) return false;
 
-        if (!exec(schema)) return false;
-
-        // Add ipdr_key_id column to flows if it doesn't exist yet
+        // Idempotent migrations — errors are ignored (column/key already exists).
         exec("ALTER TABLE flows ADD COLUMN ipdr_key_id BIGINT UNSIGNED AFTER metadata");
         exec("ALTER TABLE flows ADD KEY idx_flow_ipdr (ipdr_key_id)");
-        // Drop application_category if it still exists (migration)
         exec("ALTER TABLE flows DROP COLUMN application_category");
-        // Extend pattern_type ENUM if needed (idempotent)
         exec("ALTER TABLE application_mappings MODIFY COLUMN pattern_type "
              "ENUM('hostname_exact','hostname_suffix','ip_exact','ip_cidr') NOT NULL");
-        // capture_policy — allowlist for the flow monitor
-        exec("CREATE TABLE IF NOT EXISTS capture_policy ("
-             "  application VARCHAR(255) NOT NULL PRIMARY KEY,"
-             "  enabled     TINYINT(1)   NOT NULL DEFAULT 1"
-             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        exec(
+            "CREATE TABLE IF NOT EXISTS capture_policy ("
+            "  application VARCHAR(255) NOT NULL PRIMARY KEY,"
+            "  enabled     TINYINT(1)   NOT NULL DEFAULT 1"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        );
         return true;
     }
 
@@ -1872,14 +1882,25 @@ private:
         AppMappings::Match m;
         bool matched = false;
 
+        // 1. Hostname/URL — highest priority; always applied when SNI/DNS was captured.
         for (const std::string& host : f.hostnames) {
             if (mappings_.lookup_by_hostname(host, m)) { matched = true; break; }
         }
+
+        // 2. Exact IP — explicit operator entry, applied regardless of nDPI verdict.
         if (!matched) {
             if (mappings_.lookup_by_ip(f.dst_ip, m)) matched = true;
             else if (mappings_.lookup_by_ip(f.src_ip, m)) matched = true;
         }
-        if (!matched && f.ip_version == 4) {
+
+        // 3. CIDR — only when the application is still completely unidentified.
+        //    This prevents broad cloud-provider CIDRs (AWS, Azure, GCP) from
+        //    overriding specific services like PostHog or Cursor that happen to
+        //    be hosted on those platforms but should be identified by hostname.
+        //    Protocols like TLS/QUIC/HTTP that nDPI has partially identified are
+        //    excluded; truly unknown UDP/TCP flows still get CIDR attribution.
+        if (!matched && f.ip_version == 4 &&
+            (f.application.empty() || f.application == "Unknown")) {
             uint32_t dst_n, src_n;
             std::memcpy(&dst_n, f.dst_ip_bytes, 4);
             std::memcpy(&src_n, f.src_ip_bytes, 4);

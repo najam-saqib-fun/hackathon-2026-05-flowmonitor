@@ -14,6 +14,45 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { ApiService } from '../../core/services/api.service';
 
+const CSV_MAPPING_COLS = ['pattern_type', 'pattern', 'application'];
+
+const VALID_PATTERN_TYPES = new Set(['hostname_exact', 'hostname_suffix', 'ip_exact', 'ip_cidr']);
+
+function validateImportData(format: string, data: string, requiredCsvCols: string[]): string | null {
+  const trimmed = data.trim();
+  if (!trimmed) return 'No data provided.';
+
+  if (format === 'json') {
+    let parsed: any;
+    try { parsed = JSON.parse(trimmed); } catch { return 'Invalid JSON — could not parse file.'; }
+    if (!Array.isArray(parsed)) return 'JSON must be an array of objects.';
+    if (parsed.length === 0) return 'JSON array is empty.';
+    const missing = requiredCsvCols.filter(c => !(c in parsed[0]));
+    if (missing.length) return `JSON objects missing required keys: ${missing.join(', ')}`;
+    if (requiredCsvCols.includes('pattern_type')) {
+      const bad = parsed.find((r: any) => !VALID_PATTERN_TYPES.has(r.pattern_type));
+      if (bad) return `Invalid pattern_type "${bad.pattern_type}". Must be: ${[...VALID_PATTERN_TYPES].join(', ')}`;
+    }
+    return null;
+  }
+
+  // CSV validation
+  const lines = trimmed.split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return 'CSV must have a header row and at least one data row.';
+  const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const missing = requiredCsvCols.filter(c => !headers.includes(c));
+  if (missing.length) return `CSV header missing required columns: ${missing.join(', ')}. Expected header: ${requiredCsvCols.join(',')}`;
+  if (requiredCsvCols.includes('pattern_type')) {
+    const ptIdx = headers.indexOf('pattern_type');
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(',');
+      const pt = cols[ptIdx]?.trim();
+      if (pt && !VALID_PATTERN_TYPES.has(pt)) return `Row ${i}: invalid pattern_type "${pt}". Must be: ${[...VALID_PATTERN_TYPES].join(', ')}`;
+    }
+  }
+  return null;
+}
+
 @Component({
   selector: 'app-mappings',
   standalone: true,
@@ -260,13 +299,34 @@ export class MappingsComponent implements OnInit {
   loadFile(event: any) {
     const file = event.target.files?.[0];
     if (!file) return;
+
+    // Validate extension matches selected format
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (ext !== this.importFormat) {
+      this.importResult.set(`Error: file extension ".${ext}" does not match selected format "${this.importFormat}". Please select the correct format or upload a matching file.`);
+      (event.target as HTMLInputElement).value = '';
+      return;
+    }
+
     const reader = new FileReader();
-    reader.onload = e => { this.importData = (e.target?.result as string) || ''; };
+    reader.onload = e => {
+      const raw = (e.target?.result as string) || '';
+      const err = validateImportData(this.importFormat, raw, CSV_MAPPING_COLS);
+      if (err) {
+        this.importResult.set('Error: ' + err);
+        this.importData = '';
+      } else {
+        this.importData = raw;
+        this.importResult.set(null);
+      }
+    };
     reader.readAsText(file);
   }
 
   runImport() {
     if (!this.importData.trim()) return;
+    const err = validateImportData(this.importFormat, this.importData, CSV_MAPPING_COLS);
+    if (err) { this.importResult.set('Error: ' + err); return; }
     this.importing.set(true);
     this.importResult.set(null);
     this.api.importMappings(this.importFormat, this.importData).subscribe({

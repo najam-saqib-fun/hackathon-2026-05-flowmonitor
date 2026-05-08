@@ -1,6 +1,7 @@
 const express = require('express');
 const { query } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
+const analytics = require('../analytics');
 
 const router = express.Router();
 
@@ -53,6 +54,7 @@ router.put('/:application', requireAuth, requireAdmin, async (req, res) => {
       'INSERT INTO capture_policy (application, enabled) VALUES (?, ?) ON DUPLICATE KEY UPDATE enabled = ?',
       [application, val, val]
     );
+    analytics.track('policy_updated', req.user.username, { application, enabled: val });
     res.json({ application, enabled: val });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -73,6 +75,7 @@ router.post('/bulk', requireAuth, requireAdmin, async (req, res) => {
         [u.application, val, val]
       );
     }
+    analytics.track('policy_bulk_updated', req.user.username, { count: updates.length });
     res.json({ updated: updates.length });
   } catch (err) {
     res.status(500).json({ error: err.message });

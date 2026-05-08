@@ -1,6 +1,7 @@
 const express = require('express');
 const { query, queryOne } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
+const analytics = require('../analytics');
 
 const router = express.Router();
 
@@ -43,6 +44,7 @@ router.post('/rules', requireAdmin, async (req, res) => {
       [name, metric, threshold, window_seconds, application || null, src_ip || null,
        dst_ip || null, protocol || null, req.user.id]
     );
+    analytics.track('alert_rule_created', req.user.username, { name, metric, threshold, window_seconds, application });
     res.status(201).json({ id: result.insertId, name, metric, threshold });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -75,6 +77,7 @@ router.put('/rules/:id', requireAdmin, async (req, res) => {
 router.delete('/rules/:id', requireAdmin, async (req, res) => {
   try {
     await query('DELETE FROM alert_rules WHERE id = ?', [req.params.id]);
+    analytics.track('alert_rule_deleted', req.user.username, { rule_id: req.params.id });
     res.json({ message: 'Deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -110,6 +113,7 @@ router.get('/events', requireAuth, async (req, res) => {
 router.post('/events/:id/acknowledge', requireAuth, async (req, res) => {
   try {
     await query('UPDATE alert_events SET acknowledged = 1 WHERE id = ?', [req.params.id]);
+    analytics.track('alert_acknowledged', req.user.username, { event_id: req.params.id });
     res.json({ message: 'Acknowledged' });
   } catch (err) {
     res.status(500).json({ error: err.message });

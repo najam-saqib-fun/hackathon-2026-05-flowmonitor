@@ -28,8 +28,11 @@ export class ApiService {
   getTopTalkers(params: Record<string, any> = {}) {
     return this.http.get<any>(`${this.base}/stats/top-talkers`, { params: this.toParams(params) });
   }
-  getBandwidth(granularity: 'minute' | 'hour' = 'minute', limit = 60) {
-    return this.http.get<any[]>(`${this.base}/stats/bandwidth`, { params: { granularity, limit } });
+  getBandwidth(params: Record<string, any> = {}) {
+    return this.http.get<any[]>(`${this.base}/stats/bandwidth`, { params: this.toParams(params) });
+  }
+  getAppUsage(params: Record<string, any> = {}) {
+    return this.http.get<any[]>(`${this.base}/stats/app-usage`, { params: this.toParams(params) });
   }
   getProtocolDist(params: Record<string, any> = {}) {
     return this.http.get<any[]>(`${this.base}/stats/protocol-distribution`, { params: this.toParams(params) });

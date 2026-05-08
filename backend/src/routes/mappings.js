@@ -1,6 +1,7 @@
 const express = require('express');
 const { query, queryOne } = require('../db');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
+const analytics = require('../analytics');
 
 const router = express.Router();
 
@@ -48,6 +49,7 @@ router.post('/', requireAdmin, async (req, res) => {
       'INSERT INTO application_mappings (pattern_type, pattern, application, category, priority, notes) VALUES (?, ?, ?, ?, ?, ?)',
       [pattern_type, pattern.toLowerCase(), application, category || null, priority, notes || null]
     );
+    analytics.track('mapping_created', req.user.username, { pattern_type, pattern, application });
     res.status(201).json({ id: result.insertId, pattern_type, pattern, application });
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Duplicate pattern' });
@@ -98,6 +100,7 @@ router.put('/:id', requireAdmin, async (req, res) => {
 router.delete('/:id', requireAdmin, async (req, res) => {
   try {
     await query('DELETE FROM application_mappings WHERE id = ?', [req.params.id]);
+    analytics.track('mapping_deleted', req.user.username, { mapping_id: req.params.id });
     res.json({ message: 'Deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -140,6 +143,7 @@ router.post('/import', requireAdmin, async (req, res) => {
         inserted++;
       } catch { skipped++; }
     }
+    analytics.track('mappings_imported', req.user.username, { format, inserted, skipped, total: rows.length });
     res.json({ inserted, skipped, total: rows.length, errors: errors.slice(0, 10) });
   } catch (err) {
     res.status(500).json({ error: err.message });

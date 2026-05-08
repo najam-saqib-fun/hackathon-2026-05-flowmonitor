@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const { query, queryOne } = require('../db');
 const { signToken } = require('../auth');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
+const analytics = require('../analytics');
 
 const router = express.Router();
 
@@ -18,10 +19,12 @@ router.post('/login', async (req, res) => {
       [username]
     );
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      analytics.track('user_login_failed', username, { username });
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     await query('UPDATE users SET last_login = NOW() WHERE id = ?', [user.id]);
     const token = signToken({ id: user.id, username: user.username, role: user.role });
+    analytics.track('user_login', user.username, { role: user.role });
     res.json({ token, role: user.role, username: user.username });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -41,6 +44,7 @@ router.post('/users', requireAdmin, async (req, res) => {
     if (!['admin', 'viewer'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
     const hash = await bcrypt.hash(password, 10);
     await query('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)', [username, hash, role]);
+    analytics.track('user_created', req.user.username, { new_username: username, role });
     res.status(201).json({ message: 'User created', username, role });
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Username already exists' });

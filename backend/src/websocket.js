@@ -2,6 +2,7 @@ const WebSocket = require('ws');
 const { verifyToken } = require('./auth');
 const { query } = require('./db');
 const logger = require('./logger');
+const analytics = require('./analytics');
 
 const PUSH_INTERVAL_MS = parseInt(process.env.WS_PUSH_INTERVAL_MS || '15000');
 
@@ -200,6 +201,10 @@ function createWsServer(server) {
             'INSERT INTO alert_events (rule_id, metric_value, details) VALUES (?, ?, ?)',
             [rule.id, value, JSON.stringify({ rule_name: rule.name, threshold: rule.threshold })]
           );
+          analytics.track('alert_triggered', 'system', {
+            rule_id: rule.id, rule_name: rule.name,
+            metric: rule.metric, value, threshold: rule.threshold,
+          });
           // Broadcast to all connected WS clients
           const alertMsg = JSON.stringify({
             type: 'alert',

@@ -73,6 +73,7 @@ export class AppShellComponent implements OnInit {
     { label: 'IPDRs',        icon: 'vpn_key',             path: '/ipdr'        },
     { label: 'Alerts',       icon: 'notifications_active', path: '/alerts'     },
     { label: 'Policy',       icon: 'policy',               path: '/policy'      },
+    { label: 'App Usage',    icon: 'bar_chart',            path: '/app-usage'   },
   ];
 
   ngOnInit() { this.ws.connect(); }

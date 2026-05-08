@@ -25,6 +25,7 @@
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
     "mysql2": "^3.6.5",
+    "posthog-node": "^5.21.2",
     "winston": "^3.19.0",
     "ws": "^8.15.1"
   },

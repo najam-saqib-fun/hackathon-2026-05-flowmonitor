@@ -44,6 +44,10 @@ export const routes: Routes = [
         path: 'policy',
         loadComponent: () => import('./features/policy/policy.component').then(m => m.PolicyComponent),
       },
+      {
+        path: 'app-usage',
+        loadComponent: () => import('./features/app-usage/app-usage.component').then(m => m.AppUsageComponent),
+      },
     ],
   },
   { path: '**', redirectTo: '/dashboard' },

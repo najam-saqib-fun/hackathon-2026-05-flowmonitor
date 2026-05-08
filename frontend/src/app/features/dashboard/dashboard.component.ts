@@ -35,8 +35,6 @@ function fmtApp(app: string, hostnames: string | null | undefined): string {
   return app;
 }
 
-const BW_REFRESH_MS = 15_000;
-
 @Component({
   selector: 'app-dashboard',
   standalone: true,
@@ -55,12 +53,6 @@ const BW_REFRESH_MS = 15_000;
       gap: 0.75rem;
       margin-bottom: 1rem;
     }
-    .dash-toggles {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      flex-wrap: wrap;
-    }
     .charts-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -73,40 +65,25 @@ const BW_REFRESH_MS = 15_000;
       gap: 1rem;
       margin-bottom: 1.5rem;
     }
-    .chart-wrap {
-      position: relative;
-      height: 260px;
-      width: 100%;
-    }
-    .chart-wrap canvas {
-      position: absolute;
-      inset: 0;
-    }
+    .chart-wrap { position: relative; height: 260px; width: 100%; }
+    .chart-wrap canvas { position: absolute; inset: 0; }
   `],
   template: `
     <div class="dash-header">
       <div class="page-header" style="margin:0;">
         <span class="live-dot"></span>Real-time Dashboard
       </div>
-      <div class="dash-toggles">
-        <mat-slide-toggle
-          [checked]="!ws.paused()"
-          (change)="ws.toggle()"
-          color="accent"
-          style="font-size:0.85rem;">
+      <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
+        <mat-slide-toggle [checked]="!ws.paused()" (change)="ws.toggle()" color="accent" style="font-size:0.85rem;">
           {{ ws.paused() ? 'Paused' : 'Live' }}
         </mat-slide-toggle>
-        <mat-slide-toggle
-          [checked]="showUnknown()"
-          (change)="showUnknown.set($event.checked)"
-          color="primary"
-          style="font-size:0.85rem;">
+        <mat-slide-toggle [checked]="showUnknown()" (change)="showUnknown.set($event.checked)" color="primary" style="font-size:0.85rem;">
           Show Unclassified
         </mat-slide-toggle>
       </div>
     </div>
 
-    <!-- Time filter -->
+    <!-- Time filter (does NOT affect live flows) -->
     <div style="margin-bottom:1rem;">
       <app-time-filter (filterChange)="onFilterChange($event)"></app-time-filter>
     </div>
@@ -140,7 +117,7 @@ const BW_REFRESH_MS = 15_000;
     <div class="two-col-grid">
       <div class="card">
         <div class="card-title">Top Applications</div>
-        <div *ngFor="let app of filteredTopApps(); let i = index" style="margin-bottom:0.75rem;">
+        <div *ngFor="let app of filteredTopApps()" style="margin-bottom:0.75rem;">
           <div style="display:flex;justify-content:space-between;font-size:0.85rem;margin-bottom:3px;">
             <span style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%;">
               {{ app.application || 'Unknown' }}
@@ -148,8 +125,7 @@ const BW_REFRESH_MS = 15_000;
             </span>
             <span style="color:#94a3b8;flex-shrink:0;margin-left:0.5rem;">{{ fmtBytes(app.bytes || app.total_bytes || 0) }}</span>
           </div>
-          <mat-progress-bar mode="determinate" [value]="appPct(app)" color="accent"
-            style="border-radius:4px;height:4px;"></mat-progress-bar>
+          <mat-progress-bar mode="determinate" [value]="appPct(app)" color="accent" style="border-radius:4px;height:4px;"></mat-progress-bar>
           <div style="font-size:0.75rem;color:#64748b;margin-top:2px;">{{ app.flows | number }} flows</div>
         </div>
         <div *ngIf="!filteredTopApps().length" style="color:#475569;font-size:0.85rem;">No data</div>
@@ -167,7 +143,7 @@ const BW_REFRESH_MS = 15_000;
           </ng-container>
           <ng-container matColumnDef="bytes">
             <th mat-header-cell *matHeaderCellDef style="color:#64748b;">Bytes</th>
-            <td mat-cell *matCellDef="let r" style="font-size:0.85rem;">{{ fmtBytes(r.total_bytes || 0) }}</td>
+            <td mat-cell *matCellDef="let r">{{ fmtBytes(r.total_bytes || 0) }}</td>
           </ng-container>
           <tr mat-header-row *matHeaderRowDef="['ip','bytes']"></tr>
           <tr mat-row *matRowDef="let row; columns: ['ip','bytes']"></tr>
@@ -176,11 +152,12 @@ const BW_REFRESH_MS = 15_000;
       </div>
     </div>
 
-    <!-- Live flows table -->
+    <!-- Live flows — unaffected by time filter, always last 5 min -->
     <div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;">
         <span class="card-title" style="margin:0;">
           Live Flows <span class="live-dot" style="margin-left:8px;"></span>
+          <span style="font-size:0.72rem;color:#64748b;font-weight:400;margin-left:8px;">(records of last 5 mins)</span>
         </span>
         <span style="color:#475569;font-size:0.75rem;">
           {{ ws.paused() ? '⏸ Updates paused' : 'Auto-refreshes every 15s' }}
@@ -208,9 +185,7 @@ const BW_REFRESH_MS = 15_000;
           <ng-container matColumnDef="app">
             <th mat-header-cell *matHeaderCellDef style="color:#64748b;">Application</th>
             <td mat-cell *matCellDef="let f" style="font-size:0.85rem;">
-              <span [style.color]="f._unclassified ? '#f59e0b' : 'inherit'">
-                {{ fmtApp(f.application, f.hostnames) }}
-              </span>
+              <span [style.color]="f._unclassified ? '#f59e0b' : 'inherit'">{{ fmtApp(f.application, f.hostnames) }}</span>
               <span *ngIf="f.application_category" style="color:#64748b;font-size:0.72rem;margin-left:4px;">({{ f.application_category }})</span>
             </td>
           </ng-container>
@@ -236,7 +211,6 @@ export class DashboardComponent implements OnInit, OnDestroy {
   private api = inject(ApiService);
   ws = inject(WebSocketService);
   private sub?: Subscription;
-  private bwTimer?: ReturnType<typeof setInterval>;
 
   kpis       = signal<any[]>([]);
   _topApps   = signal<any[]>([]);
@@ -248,20 +222,16 @@ export class DashboardComponent implements OnInit, OnDestroy {
 
   maxAppBytes = 0;
   fmtBytes = fmtBytes;
-  fmtApp  = fmtApp;
-
-  topApps = this._topApps;
+  fmtApp   = fmtApp;
 
   filteredTopApps() {
     const apps = this._topApps();
-    if (this.showUnknown()) return apps;
-    return apps.filter(a => !this.isUnclassified(a));
+    return this.showUnknown() ? apps : apps.filter(a => !this.isUnclassified(a));
   }
 
   filteredLiveFlows() {
     const flows = this._liveFlows();
-    if (this.showUnknown()) return flows;
-    return flows.filter(f => !f._unclassified);
+    return this.showUnknown() ? flows : flows.filter(f => !f._unclassified);
   }
 
   bwChartData: ChartData<'line'> = {
@@ -293,25 +263,25 @@ export class DashboardComponent implements OnInit, OnDestroy {
   };
 
   ngOnInit() {
-    this.loadAll();
-    this.loadBandwidth();
-    this.bwTimer = setInterval(() => this.loadBandwidth(), BW_REFRESH_MS);
+    // TimeFilterComponent emits the default "Last Week" on init, which triggers
+    // onFilterChange → loadAll + loadBandwidth. No separate initial load needed.
     this.sub = this.ws.message$.subscribe(msg => {
-      if (msg?.type === 'live_update') this.applyUpdate(msg.data);
+      if (msg?.type === 'live_update') this.applyWsUpdate(msg.data);
     });
   }
 
   ngOnDestroy() {
     this.sub?.unsubscribe();
-    clearInterval(this.bwTimer);
   }
 
   onFilterChange(f: TimeFilter) {
     this.activeFilter.set(f);
-    this.loadAll();
+    this.loadFiltered();
+    // Live flows are NOT affected by the time filter
+    this.api.getLiveFlows(300).subscribe(d => this._liveFlows.set(d));
   }
 
-  private loadAll() {
+  private loadFiltered() {
     const f = this.activeFilter();
     const p: Record<string, any> = {};
     if (f.start) p['start'] = f.start;
@@ -323,43 +293,39 @@ export class DashboardComponent implements OnInit, OnDestroy {
       this.maxAppBytes = Math.max(...d.map((r: any) => r.total_bytes || r.bytes || 0), 1);
     });
     this.api.getTopTalkers({ ...p, limit: 8 }).subscribe(d => this.topTalkers.set(d.sources || []));
-    this.api.getLiveFlows(3600).subscribe(d => this._liveFlows.set(d));
     this.api.getProtocolDist(p).subscribe(d => {
-      const tcp  = d.find((r: any) => r.protocol === 6)?.bytes  || 0;
-      const udp  = d.find((r: any) => r.protocol === 17)?.bytes || 0;
-      const icmp = d.find((r: any) => r.protocol === 1)?.bytes  || 0;
-      const other = d.filter((r: any) => ![1, 6, 17].includes(r.protocol)).reduce((s: number, r: any) => s + (r.bytes || 0), 0);
-      this.protoChartData = { ...this.protoChartData, datasets: [{ ...this.protoChartData.datasets[0], data: [tcp, udp, icmp, other] }] };
+      const tcp   = d.find((r: any) => r.protocol === 6)?.bytes  || 0;
+      const udp   = d.find((r: any) => r.protocol === 17)?.bytes || 0;
+      const icmp  = d.find((r: any) => r.protocol === 1)?.bytes  || 0;
+      const other = d.filter((r: any) => ![1,6,17].includes(r.protocol))
+                     .reduce((s: number, r: any) => s + (r.bytes || 0), 0);
+      this.protoChartData = {
+        ...this.protoChartData,
+        datasets: [{ ...this.protoChartData.datasets[0], data: [tcp, udp, icmp, other] }],
+      };
     });
-  }
-
-  private loadBandwidth() {
-    this.api.getBandwidth('minute', 30).subscribe(d => {
+    // Bandwidth also respects the time filter
+    this.api.getBandwidth(p).subscribe(d => {
       this.bwChartData = {
-        labels: d.map((r: any) => r.bucket?.slice(11, 16) || ''),
+        labels: d.map((r: any) => r.bucket?.slice(11, 16) || r.bucket?.slice(0, 10) || ''),
         datasets: [{ ...this.bwChartData.datasets[0], data: d.map((r: any) => r.bytes || 0) }],
       };
     });
   }
 
-  private applyUpdate(data: any) {
-    if (data.live_flows)  this._liveFlows.set(data.live_flows);
-    if (data.top_apps)    {
-      this._topApps.set(data.top_apps);
-      this.maxAppBytes = Math.max(...data.top_apps.map((r: any) => r.total_bytes || r.bytes || 0), 1);
-    }
-    if (data.top_talkers) this.topTalkers.set(data.top_talkers);
-    if (data.overview)    this.updateKpis(data.overview);
+  // WebSocket pushes always reflect "now" — update live widgets only, never the filter-scoped ones
+  private applyWsUpdate(data: any) {
+    if (data.live_flows) this._liveFlows.set(data.live_flows);
   }
 
   private updateKpis(d: any) {
     this.kpis.set([
-      { label: 'Total Flows',      value: (d.total_flows || 0).toLocaleString() },
-      { label: 'Total Bytes',      value: fmtBytes(d.total_bytes || 0) },
-      { label: 'Flows (60s)',      value: (d.flows_last_60s || 0).toLocaleString(), sub: 'last minute' },
-      { label: 'Bytes (60s)',      value: fmtBytes(d.bytes_last_60s || 0),          sub: 'last minute' },
-      { label: 'Unique Source IPs',value: (d.unique_src_ips || 0).toLocaleString() },
-      { label: 'Applications',     value: (d.unique_apps || 0).toLocaleString() },
+      { label: 'Total Flows',       value: (d.total_flows || 0).toLocaleString() },
+      { label: 'Total Bytes',       value: fmtBytes(d.total_bytes || 0) },
+      { label: 'Flows (60s)',       value: (d.flows_last_60s || 0).toLocaleString(), sub: 'last minute' },
+      { label: 'Bytes (60s)',       value: fmtBytes(d.bytes_last_60s || 0),          sub: 'last minute' },
+      { label: 'Unique Source IPs', value: (d.unique_src_ips || 0).toLocaleString() },
+      { label: 'Applications',      value: (d.unique_apps || 0).toLocaleString() },
     ]);
   }
 

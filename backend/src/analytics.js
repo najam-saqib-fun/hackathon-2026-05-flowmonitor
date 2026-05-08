@@ -16,12 +16,12 @@ if (process.env.POSTHOG_API_KEY && process.env.POSTHOG_HOST) {
 }
 
 function track(event, userId, properties = {}) {
-  const payload = { event, userId, properties, ts: new Date().toISOString() };
+  const payload = { event, distinctId: userId || 'anonymous', properties, ts: new Date().toISOString() };
   if (posthog) {
     posthog.capture({ distinctId: userId || 'anonymous', event, properties });
-  } else {
-    logger.info('analytics.event', payload);
   }
+  // Always log so events are visible in structured logs regardless of PostHog status
+  logger.info('analytics.event', payload);
 }
 
 function trackApiCall(route, method, userId, durationMs, statusCode) {

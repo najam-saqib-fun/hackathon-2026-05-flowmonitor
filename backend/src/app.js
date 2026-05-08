@@ -43,14 +43,23 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'] }));
 app.use(express.json());
 
-// Request timing middleware for analytics
-app.use((req, _res, next) => {
+// Request timing + analytics middleware
+app.use((req, res, next) => {
   req._startMs = Date.now();
+  res.on('finish', () => {
+    // Skip health, static, and OPTIONS
+    if (req.method === 'OPTIONS' || req.path === '/api/health') return;
+    const durationMs = Date.now() - req._startMs;
+    analytics.trackApiCall(req.path, req.method, req.user?.username || 'anonymous', durationMs, res.statusCode);
+  });
   next();
 });
 
-// Rate-limit login endpoint
-app.use('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 20 }));
+// Rate-limit login endpoint (relaxed in dev so tests don't get blocked)
+const loginRateLimit = NODE_ENV === 'production'
+  ? rateLimit({ windowMs: 15 * 60 * 1000, max: 20 })
+  : rateLimit({ windowMs: 60 * 1000, max: 200 });
+app.use('/api/auth/login', loginRateLimit);
 
 app.use('/api/auth',        authRoutes);
 app.use('/api/flows',       flowRoutes);

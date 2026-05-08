@@ -14,6 +14,28 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDialogModule } from '@angular/material/dialog';
 import { ApiService } from '../../core/services/api.service';
 
+const CSV_SUBSCRIBER_COLS = ['ip_address', 'subscriber_id'];
+
+function validateSubscriberImport(format: string, data: string): string | null {
+  const trimmed = data.trim();
+  if (!trimmed) return 'No data provided.';
+  if (format === 'json') {
+    let parsed: any;
+    try { parsed = JSON.parse(trimmed); } catch { return 'Invalid JSON — could not parse file.'; }
+    if (!Array.isArray(parsed)) return 'JSON must be an array of objects.';
+    if (parsed.length === 0) return 'JSON array is empty.';
+    const missing = CSV_SUBSCRIBER_COLS.filter(c => !(c in parsed[0]));
+    if (missing.length) return `JSON objects missing required keys: ${missing.join(', ')}`;
+    return null;
+  }
+  const lines = trimmed.split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return 'CSV must have a header row and at least one data row.';
+  const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const missing = CSV_SUBSCRIBER_COLS.filter(c => !headers.includes(c));
+  if (missing.length) return `CSV header missing required columns: ${missing.join(', ')}. Expected: ip_address,subscriber_id,name,notes`;
+  return null;
+}
+
 @Component({
   selector: 'app-subscribers',
   standalone: true,
@@ -307,13 +329,26 @@ export class SubscribersComponent implements OnInit {
   loadFile(event: any) {
     const file = event.target.files?.[0];
     if (!file) return;
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (ext !== this.importFormat) {
+      this.importResult.set(`Error: file extension ".${ext}" does not match selected format "${this.importFormat}".`);
+      (event.target as HTMLInputElement).value = '';
+      return;
+    }
     const reader = new FileReader();
-    reader.onload = e => { this.importData = (e.target?.result as string) || ''; };
+    reader.onload = e => {
+      const raw = (e.target?.result as string) || '';
+      const err = validateSubscriberImport(this.importFormat, raw);
+      if (err) { this.importResult.set('Error: ' + err); this.importData = ''; }
+      else { this.importData = raw; this.importResult.set(null); }
+    };
     reader.readAsText(file);
   }
 
   runImport() {
     if (!this.importData.trim()) return;
+    const err = validateSubscriberImport(this.importFormat, this.importData);
+    if (err) { this.importResult.set('Error: ' + err); return; }
     this.importing.set(true);
     this.importResult.set(null);
     this.api.importSubscribers(this.importFormat, this.importData).subscribe({
