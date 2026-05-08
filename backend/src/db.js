@@ -1,4 +1,5 @@
 const mysql = require('mysql2/promise');
+const logger = require('./logger');
 
 let pool;
 
@@ -164,7 +165,7 @@ async function ensureSchema(pool) {
         "INSERT INTO users (username, password_hash, role) VALUES ('admin', ?, 'admin')",
         [hash]
       );
-      console.log('[db] Seeded default admin user (username: admin, password: admin123)');
+      logger.info('Seeded default admin user', { username: 'admin' });
     }
   } finally {
     conn.release();

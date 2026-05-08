@@ -246,4 +246,52 @@ JWT_SECRET=change-me-to-a-long-random-secret
 JWT_EXPIRES_IN=24h
 WS_PUSH_INTERVAL_MS=15000
 GEOIP_DB_PATH=          # optional MaxMind GeoLite2 path
+LOG_LEVEL=info          # error | warn | info | debug
+SENTRY_DSN=             # optional; leave blank to disable
+POSTHOG_API_KEY=        # optional; leave blank to fall back to log events
+POSTHOG_HOST=https://app.posthog.com
 ```
+
+---
+
+## Things to NEVER do
+
+- **Never write to `total_bytes` or `total_packets`** — they are `GENERATED ALWAYS AS … STORED` columns; any write fails.
+- **Never read `protos.tls_quic.*` without checking `proto_is_tls_family()` first** — the union aliases DNS counters to TLS `char*`; causes SIGSEGV.
+- **Never reference `flows.application_category` in a query** — column was removed; always LEFT JOIN `application_mappings` to derive it.
+- **Never use `console.log` / `console.error`** — use `require('./logger')` so output is structured JSON.
+- **Never bypass the auth middleware** — every route except `/api/auth/login` and `/api/health` requires `requireAuth`.
+- **Never commit `.env`** — it contains real DB credentials and JWT secret; `.env.example` is the template.
+- **Never write SQL strings with user input concatenated** — always use `?` placeholders and pass values array to `query()`.
+- **Never insert a module-level constant between `})` and `export class` in Angular** — breaks the decorator-class binding (`TS1206`).
+- **Never call `pool.getConnection()` directly** — use the `query()` helper from `backend/src/db.js` which manages lifecycle.
+- **Never seed data into the `capture_policy` table unless you intend strict allowlist mode** — an empty table means "capture everything"; one row flips to whitelist.
+
+---
+
+## Key files by path
+
+| File | Purpose |
+|------|---------|
+| `src/flow_monitor.cpp` | Core C++ daemon: FlowTracker, FlowDB, NdpiContext, AppMappings |
+| `src/pcap_processor.cpp` | PCAP reader / live NIC tap → Unix socket sender |
+| `src/common.h` | Wire protocol (PacketMessage 50-byte header + length prefix) |
+| `backend/src/index.js` | Express app, route mounting, health, admin/metrics endpoint |
+| `backend/src/db.js` | mysql2 promise pool (20 conns), `ensureSchema()`, `query()` helper |
+| `backend/src/websocket.js` | JWT-authenticated WS server, 15 s push loop, 30 s alert check |
+| `backend/src/logger.js` | Winston structured logger — use this, not console.* |
+| `backend/src/analytics.js` | PostHog/log analytics wrapper — track key events here |
+| `backend/src/routes/stats.js` | KPI, top-apps, top-talkers, bandwidth, protocol distribution |
+| `frontend/src/app/features/dashboard/dashboard.component.ts` | Main real-time dashboard |
+| `frontend/src/app/core/services/api.service.ts` | All HTTP calls; auth token attached via AuthInterceptor |
+| `frontend/src/app/core/services/websocket.service.ts` | WS client, reconnect, pause/resume |
+| `frontend/src/styles.scss` | Global dark theme, `.dark-dialog`, chart card styles |
+
+---
+
+## Open questions / known weirdness
+
+- **`WS_PORT` env var is declared in `.env` but not used** — the WS server shares the HTTP port via `server.listen(PORT)`; `WS_PORT` is vestigial and can be removed.
+- **`application_category` JOIN is repeated in 5+ route files** — should be extracted to a shared SQL fragment; deferred to avoid large refactor mid-hackathon.
+- **GeoIP is wired in `.env` but the feature is not yet rendered in the UI** — the data is available in the DB; a GeoIP column on the flows table + map widget is a natural next step.
+- **`capture_policy` reload happens inside `sync_active()`** — there is a ~30 s lag between UI changes and daemon enforcement; acceptable for operator use.

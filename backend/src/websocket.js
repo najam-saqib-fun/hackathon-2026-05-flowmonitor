@@ -1,6 +1,7 @@
 const WebSocket = require('ws');
 const { verifyToken } = require('./auth');
 const { query } = require('./db');
+const logger = require('./logger');
 
 const PUSH_INTERVAL_MS = parseInt(process.env.WS_PUSH_INTERVAL_MS || '15000');
 
@@ -96,7 +97,7 @@ function createWsServer(server) {
           });
           ws.send(payload);
         } catch (err) {
-          console.error('[ws] push error:', err.message);
+          logger.error('WS push error', { err: err.message });
         }
       }, PUSH_INTERVAL_MS);
     }
@@ -211,11 +212,11 @@ function createWsServer(server) {
         }
       }
     } catch (err) {
-      console.error('[ws] alert check error:', err.message);
+      logger.error('WS alert check error', { err: err.message });
     }
   }, 30000);
 
-  console.log(`[ws] WebSocket server ready on /ws`);
+  logger.info('WebSocket server ready', { path: '/ws' });
   return wss;
 }
 

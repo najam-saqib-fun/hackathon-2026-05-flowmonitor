@@ -17,10 +17,7 @@ import { TimeFilterComponent, TimeFilter } from '../../shared/time-filter/time-f
 Chart.register(...registerables);
 
 function fmtBytes(b: number): string {
-  console.log('fmtBytes', b, typeof b);
-  if(typeof b !== 'number') {
-    b = Number(b);
-  };
+  if (typeof b !== 'number') b = Number(b);
   if (!b) return '0 B';
   if (b >= 1e9) return (b / 1e9).toFixed(2) + ' GB';
   if (b >= 1e6) return (b / 1e6).toFixed(2) + ' MB';
