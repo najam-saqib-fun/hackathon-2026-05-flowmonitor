@@ -196,6 +196,7 @@ struct Flow {
     std::string tls_issuer_dn;
     std::string tls_subject_dn;
     uint32_t    tls_cert_not_after = 0;
+    uint32_t    quic_version = 0;
 
     uint64_t ipdr_key_id = 0;
 
@@ -1013,6 +1014,8 @@ public:
             meta << ",\"tls_subject_dn\":\"" << json_escape(f.tls_subject_dn) << "\"";
         if (f.tls_cert_not_after)
             meta << ",\"tls_cert_not_after\":" << f.tls_cert_not_after;
+        if (f.quic_version)
+            meta << ",\"quic_version\":" << f.quic_version;
         meta << "}";
 
         // The `id = LAST_INSERT_ID(id)` trick lets us get the row id back via
@@ -1810,6 +1813,22 @@ private:
                 else if (v == 0x0303) f.tls_version = "TLS1.2";
                 else if (v == 0x0304) f.tls_version = "TLS1.3";
             }
+            // QUIC/TLS SNI: nDPI stores comma-separated names in tq.server_names
+            // (different from host_server_name which is HTTP-only and fixed-size).
+            if (tq.server_names && *tq.server_names) {
+                std::string raw(tq.server_names);
+                std::istringstream ss(raw);
+                std::string token;
+                while (std::getline(ss, token, ',')) {
+                    if (!token.empty() && f.hostnames_set.insert(token).second)
+                        f.hostnames.push_back(token);
+                }
+            }
+            if (tq.quic_version && !f.quic_version)
+                f.quic_version = tq.quic_version;
+            if (tq.ja4_client[0] && f.ja3_client.empty())
+                f.ja3_client = std::string(tq.ja4_client,
+                                           strnlen(tq.ja4_client, sizeof(tq.ja4_client)));
             if (tq.ja3_server[0] && f.ja3_server.empty())
                 f.ja3_server = std::string(tq.ja3_server,
                                            strnlen(tq.ja3_server, sizeof(tq.ja3_server)));

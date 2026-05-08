@@ -36,14 +36,28 @@ function fmtBytes(b: number): string {
 @Component({
   selector: 'app-flow-detail-modal',
   standalone: true,
-  imports: [NgIf, MatButtonModule, MatIconModule, MatDialogModule, DatePipe],
+  imports: [NgIf, NgFor, MatButtonModule, MatIconModule, MatDialogModule, DatePipe],
   template: `
-    <div style="padding:1.5rem;max-width:95vw;">
+    <div style="padding:1.5rem;max-width:95vw;min-width:340px;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
         <h2 style="margin:0;font-size:1rem;color:#818cf8;">Flow #{{ data?.id }}</h2>
         <button mat-icon-button (click)="close()"><mat-icon>close</mat-icon></button>
       </div>
-      <pre style="font-family:monospace;background:#12151e;color:#e2e8f0;padding:1rem;border-radius:8px;overflow:auto;max-height:70vh;font-size:0.8rem;white-space:pre-wrap;word-break:break-all;">{{ json }}</pre>
+
+      <!-- QUIC metadata card -->
+      <div *ngIf="quicMeta" style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:0.75rem 1rem;margin-bottom:1rem;">
+        <div style="font-size:0.75rem;font-weight:600;color:#22d3ee;letter-spacing:0.05em;margin-bottom:0.5rem;">
+          QUIC / TLS Metadata
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.25rem 1rem;font-size:0.8rem;">
+          <ng-container *ngFor="let kv of quicRows">
+            <span style="color:#64748b;">{{ kv[0] }}</span>
+            <span style="color:#e2e8f0;word-break:break-all;">{{ kv[1] }}</span>
+          </ng-container>
+        </div>
+      </div>
+
+      <pre style="font-family:monospace;background:#12151e;color:#e2e8f0;padding:1rem;border-radius:8px;overflow:auto;max-height:55vh;font-size:0.78rem;white-space:pre-wrap;word-break:break-all;">{{ json }}</pre>
       <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
         <button mat-flat-button color="primary" (click)="close()">Close</button>
       </div>
@@ -52,8 +66,42 @@ function fmtBytes(b: number): string {
 })
 export class FlowDetailModalComponent {
   data: any;
-  get json() { return JSON.stringify(this.data, null, 2); }
   private dialog = inject(MatDialog);
+
+  get quicMeta(): Record<string, any> | null {
+    if (!this.data?.metadata) return null;
+    try {
+      const m = typeof this.data.metadata === 'string'
+        ? JSON.parse(this.data.metadata) : this.data.metadata;
+      const keys = ['quic_version','tls_version','tls_alpn','ja3_client','ja3_server',
+                    'tls_issuer_dn','tls_subject_dn','tls_cert_not_after'];
+      const out: Record<string, any> = {};
+      for (const k of keys) if (m[k]) out[k] = m[k];
+      return Object.keys(out).length ? out : null;
+    } catch { return null; }
+  }
+
+  get quicRows(): [string, string][] {
+    const m = this.quicMeta;
+    if (!m) return [];
+    const labels: Record<string, string> = {
+      quic_version: 'QUIC Version', tls_version: 'TLS Version',
+      tls_alpn: 'ALPN', ja3_client: 'JA4 Client', ja3_server: 'JA3 Server',
+      tls_issuer_dn: 'Issuer DN', tls_subject_dn: 'Subject DN',
+      tls_cert_not_after: 'Cert Expiry',
+    };
+    return Object.entries(m).map(([k, v]) => [labels[k] || k, String(v)]);
+  }
+
+  get json() {
+    if (!this.data) return '';
+    const d = { ...this.data };
+    if (d.metadata && typeof d.metadata === 'string') {
+      try { d.metadata = JSON.parse(d.metadata); } catch { /* leave as string */ }
+    }
+    return JSON.stringify(d, null, 2);
+  }
+
   close() { this.dialog.closeAll(); }
 }
 
@@ -160,6 +208,7 @@ export class FlowDetailModalComponent {
           <td mat-cell *matCellDef="let f" style="font-size:0.85rem;" [matTooltip]="fmtApp(f.application, f.hostnames)">
             <span [style.color]="f._unclassified ? '#f59e0b' : 'inherit'">{{ fmtApp(f.application, f.hostnames) }}</span>
             <span *ngIf="f._unclassified" class="badge badge-warn" style="margin-left:4px;font-size:0.7rem;">raw</span>
+            <span *ngIf="isQuic(f)" class="badge" style="margin-left:4px;font-size:0.68rem;background:rgba(34,211,238,0.15);color:#22d3ee;border:1px solid rgba(34,211,238,0.3);">QUIC</span>
           </td>
         </ng-container>
         <ng-container matColumnDef="bytes">
@@ -253,4 +302,9 @@ export class FlowsComponent implements OnInit {
   protoName(p: number) { return ({ 6: 'TCP', 17: 'UDP', 1: 'ICMP' } as any)[p] || `${p}`; }
   protoBadge(p: number) { return ({ 6: 'badge-tcp', 17: 'badge-udp', 1: 'badge-icmp' } as any)[p] || 'badge-other'; }
   fmtDur(ms: number) { if (!ms) return '—'; return ms < 1000 ? ms.toFixed(0) + 'ms' : (ms / 1000).toFixed(1) + 's'; }
+  isQuic(f: any): boolean {
+    const app = (f.application || '').toLowerCase();
+    return app === 'quic' || app.includes('quic') ||
+           (f.protocol === 17 && f.dst_port === 443);
+  }
 }
