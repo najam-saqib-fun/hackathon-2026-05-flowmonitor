@@ -5,7 +5,14 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "test": "jest"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/__tests__/**/*.test.js"
+    ]
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -20,6 +27,8 @@
     "ws": "^8.15.1"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "jest": "^30.4.0",
+    "nodemon": "^3.0.2",
+    "supertest": "^7.2.2"
   }
 }

@@ -1,0 +1,8 @@
+{
+  "buildCommand": "npm run build:prod",
+  "outputDirectory": "dist/flowmon-dashboard/browser",
+  "framework": "angular",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
