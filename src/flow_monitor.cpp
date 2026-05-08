@@ -613,16 +613,18 @@ static const SeedRow kSeedMappings[] = {
     {"ip_cidr", "185.60.219.0/24",    "Meta",       "Social"},
     {"ip_cidr", "31.13.24.0/21",      "Facebook",   "Social"},
     {"ip_cidr", "31.13.64.0/18",      "Facebook",   "Social"},
+    {"ip_cidr", "57.144.0.0/16",      "Facebook",   "Social"},  // fbcdn.net video CDN
     {"ip_cidr", "66.220.144.0/20",    "Facebook",   "Social"},
     {"ip_cidr", "69.63.176.0/20",     "Facebook",   "Social"},
     {"ip_cidr", "69.171.224.0/19",    "Facebook",   "Social"},
 
-    // Google IP ranges
-    {"ip_cidr", "142.250.0.0/15",     "Google",     "Search"},
-    {"ip_cidr", "142.251.152.0/24",   "Google",     "Search"},
+    // Google IP ranges — video CDN (googlevideo.com) classified as YouTube
+    {"ip_cidr", "142.250.0.0/15",     "YouTube",    "Video"},   // Google video CDN
+    {"ip_cidr", "142.251.152.0/24",   "YouTube",    "Video"},
+    {"ip_cidr", "74.125.0.0/16",      "YouTube",    "Video"},   // googlevideo.com primary
+    {"ip_cidr", "64.233.0.0/16",      "Google Meet","Video"},   // wm-in-f*.1e100.net
     {"ip_cidr", "172.217.0.0/16",     "Google",     "Search"},
     {"ip_cidr", "173.194.0.0/16",     "Google",     "Search"},
-    {"ip_cidr", "74.125.0.0/16",      "Google",     "Search"},
     {"ip_cidr", "216.58.192.0/19",    "Google",     "Search"},
     {"ip_cidr", "216.239.32.0/19",    "Google",     "Search"},
     {"ip_cidr", "209.85.128.0/17",    "Google",     "Search"},
@@ -647,6 +649,7 @@ static const SeedRow kSeedMappings[] = {
     {"ip_cidr", "131.0.72.0/22",      "Cloudflare", "CDN"},
 
     // Akamai CDN
+    {"ip_cidr", "2.16.0.0/13",        "Akamai",     "CDN"},  // 2.16-23 (2.20.x observed)
     {"ip_cidr", "23.32.0.0/11",       "Akamai",     "CDN"},
     {"ip_cidr", "23.64.0.0/14",       "Akamai",     "CDN"},
     {"ip_cidr", "96.16.0.0/15",       "Akamai",     "CDN"},
@@ -657,6 +660,7 @@ static const SeedRow kSeedMappings[] = {
     {"ip_cidr", "13.224.0.0/14",      "Amazon CloudFront", "CDN"},
     {"ip_cidr", "54.230.0.0/16",      "Amazon CloudFront", "CDN"},
     {"ip_cidr", "54.239.128.0/18",    "Amazon CloudFront", "CDN"},
+    {"ip_cidr", "108.138.0.0/15",     "Amazon CloudFront", "CDN"},  // Dubai PoP observed
     {"ip_cidr", "205.251.192.0/19",   "Amazon CloudFront", "CDN"},
 
     // AWS general
@@ -670,14 +674,22 @@ static const SeedRow kSeedMappings[] = {
     {"ip_cidr", "13.64.0.0/11",       "Microsoft Azure", "Cloud"},
     {"ip_cidr", "13.96.0.0/13",       "Microsoft Azure", "Cloud"},
     {"ip_cidr", "40.64.0.0/10",       "Microsoft Azure", "Cloud"},
+    {"ip_cidr", "52.96.0.0/11",       "Microsoft",       "Cloud"},  // 52.96-127 (52.123 observed)
     {"ip_cidr", "52.128.0.0/9",       "Microsoft Azure", "Cloud"},
     {"ip_cidr", "20.0.0.0/8",         "Microsoft Azure", "Cloud"},
 
-    // Google Cloud
-    {"ip_cidr", "34.64.0.0/10",       "Google Cloud", "Cloud"},
-    {"ip_cidr", "35.186.0.0/14",      "Google Cloud", "Cloud"},
-    {"ip_cidr", "35.192.0.0/12",      "Google Cloud", "Cloud"},
-    {"ip_cidr", "35.208.0.0/13",      "Google Cloud", "Cloud"},
+    // Google Cloud — expanded to cover all observed GCP CIDRs
+    {"ip_cidr", "34.0.0.0/11",        "Google Cloud", "Cloud"},  // 34.0-31
+    {"ip_cidr", "34.32.0.0/11",       "Google Cloud", "Cloud"},  // 34.32-63 (34.36.x observed)
+    {"ip_cidr", "34.64.0.0/10",       "Google Cloud", "Cloud"},  // 34.64-127
+    {"ip_cidr", "34.96.0.0/11",       "Google Cloud", "Cloud"},  // 34.96-127 (34.98/107/110-111)
+    {"ip_cidr", "34.128.0.0/10",      "Google Cloud", "Cloud"},  // 34.128-191 (34.149/160)
+    {"ip_cidr", "35.186.0.0/14",      "Google Cloud", "Cloud"},  // 35.186-189
+    {"ip_cidr", "35.188.0.0/14",      "Google Cloud", "Cloud"},  // 35.188-191 (35.190 observed)
+    {"ip_cidr", "35.192.0.0/12",      "Google Cloud", "Cloud"},  // 35.192-207
+    {"ip_cidr", "35.208.0.0/13",      "Google Cloud", "Cloud"},  // 35.208-215
+    {"ip_cidr", "35.216.0.0/13",      "Google Cloud", "Cloud"},  // 35.216-223
+    {"ip_cidr", "35.224.0.0/11",      "Google Cloud", "Cloud"},  // 35.224-255 (35.227 observed)
 
     // Netflix
     {"ip_cidr", "23.246.0.0/18",      "Netflix",    "Video"},
@@ -729,8 +741,16 @@ static const SeedRow kSeedMappings[] = {
     {"ip_cidr", "104.131.0.0/16",     "DigitalOcean", "Cloud"},
     {"ip_cidr", "198.199.64.0/18",    "DigitalOcean", "Cloud"},
 
-    // Mobilink / Jazz Pakistan
+    // Pakistan ISPs
     {"ip_cidr", "119.160.63.0/24",    "Jazz (Mobilink)", "ISP"},
+    {"ip_cidr", "124.109.0.0/16",     "PTCL",       "ISP"},  // PTCL DSL (124.109.34.x observed)
+    {"ip_cidr", "182.176.0.0/12",     "PTCL",       "ISP"},  // PTCL broadband (182.176-191)
+    {"ip_cidr", "202.165.249.0/24",   "PTCL",       "ISP"},  // PTCL mobile DSL
+    {"ip_cidr", "101.50.0.0/15",      "Nayatel",    "ISP"},  // Nayatel Islamabad ISP
+    {"ip_cidr", "1.9.0.0/16",         "TM Net",     "ISP"},  // TM Technology Malaysia
+
+    // Twitch Interactive
+    {"ip_cidr", "160.79.104.0/21",    "Twitch",     "Video"},
 
     // Fastly CDN
     {"ip_cidr", "23.235.32.0/20",     "Fastly",     "CDN"},
