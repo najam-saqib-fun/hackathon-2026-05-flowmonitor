@@ -234,10 +234,10 @@ static std::string canonical_flow_hash(const std::string& ip1, const std::string
 static std::string format_timestamp(uint64_t us) {
     time_t secs = static_cast<time_t>(us / 1000000ULL);
     struct tm tm_buf;
-    // Local time so the DATETIME(6) value matches the wall clock at capture
-    // time (tcpdump prints local time too). The column itself is timezone-
-    // naive — switching to UTC would just be a static shift.
-    localtime_r(&secs, &tm_buf);
+    // UTC so start_time/end_time are consistent with MySQL's CURRENT_TIMESTAMP
+    // (which is also UTC).  Using localtime_r caused a timezone skew that broke
+    // all time-range queries (WHERE start_time >= NOW() - INTERVAL N SECOND).
+    gmtime_r(&secs, &tm_buf);
     char out[40];
     int n = std::snprintf(out, sizeof(out),
                           "%04d-%02d-%02d %02d:%02d:%02d.%06u",
@@ -898,6 +898,15 @@ public:
         }
         mysql_options(conn_, MYSQL_SET_CHARSET_NAME, "utf8mb4");
 
+        // Auto-reconnect on lost connection (my_bool removed in MySQL 8; use bool).
+        bool reconnect = true;
+        mysql_options(conn_, MYSQL_OPT_RECONNECT, &reconnect);
+
+        // TCP keepalive so Railway's load-balancer doesn't silently drop the
+        // idle connection between sync intervals.
+        unsigned int connect_timeout = 10;
+        mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout);
+
         const char* sock = cfg.mysql_socket.empty() ? nullptr : cfg.mysql_socket.c_str();
         // Connect with no default DB so we can CREATE DATABASE first.
         if (!mysql_real_connect(conn_,
@@ -922,6 +931,7 @@ public:
                          cfg.mysql_db.c_str(), mysql_error(conn_));
             return false;
         }
+        db_name_ = cfg.mysql_db;
 
         if (!create_schema()) return false;
         if (!seed_app_mappings()) return false;
@@ -938,6 +948,24 @@ public:
 
     void begin_tx()  { exec("START TRANSACTION"); }
     void commit_tx() { exec("COMMIT"); }
+
+    // Ping the server and reconnect if the connection was dropped by the
+    // remote TCP proxy (common with cloud MySQL like Railway).
+    bool ping_reconnect() {
+        if (mysql_ping(conn_) == 0) return true;
+        std::fprintf(stderr, "[db] reconnecting after lost connection\n");
+        if (mysql_ping(conn_) != 0) {
+            std::fprintf(stderr, "[db] reconnect failed: %s\n", mysql_error(conn_));
+            return false;
+        }
+        // Re-select the database after reconnect (session reset clears USE).
+        if (mysql_select_db(conn_, db_name_.c_str()) != 0) {
+            std::fprintf(stderr, "[db] mysql_select_db after reconnect failed: %s\n",
+                         mysql_error(conn_));
+            return false;
+        }
+        return true;
+    }
 
     // Build a properly-escaped string literal: returns "NULL" if empty,
     // otherwise "'<escaped>'".
@@ -1171,6 +1199,7 @@ public:
 
 private:
     MYSQL* conn_ = nullptr;
+    std::string db_name_;
 
     std::string escape(const std::string& s) {
         if (!conn_) return s;
@@ -1573,6 +1602,14 @@ public:
         }
 
         if (flows_.empty()) return;
+
+        // Verify the MySQL connection is alive before writing; reconnect if
+        // the Railway TCP proxy silently dropped it between sync intervals.
+        if (!db_.ping_reconnect()) {
+            std::fprintf(stderr, "[flow_monitor] skipping sync — DB unreachable\n");
+            return;
+        }
+
         db_.commit_tx();
         db_.begin_tx();
 
@@ -2280,15 +2317,20 @@ static int run_live_capture(const Config& cfg, FlowTracker& tracker, FlowDB& db)
 
     db.begin_tx();
     uint64_t total = 0;
+    bool tx_dirty = false;   // true when the open transaction has pending writes
     while (!g_stop.load()) {
         pcap_pkthdr* header = nullptr;
         const u_char* packet = nullptr;
         int rv = pcap_next_ex(pcap, &header, &packet);
         if (rv == 0) {
-            // Read timeout — commit anything pending so partial state is
-            // visible while the link is idle, then loop and re-arm.
-            db.commit_tx();
-            db.begin_tx();
+            // Read timeout on idle link. Only commit/restart if there are
+            // actual pending writes — avoids spamming a remote DB (e.g.
+            // Railway) with 1 empty COMMIT + START TRANSACTION per second.
+            if (tx_dirty) {
+                db.commit_tx();
+                db.begin_tx();
+                tx_dirty = false;
+            }
             continue;
         }
         if (rv < 0) {
@@ -2306,10 +2348,12 @@ static int run_live_capture(const Config& cfg, FlowTracker& tracker, FlowDB& db)
             continue;
         }
         tracker.on_packet(msg, payload);
+        tx_dirty = true;
 
         if (++total % 5000 == 0) {
             db.commit_tx();
             db.begin_tx();
+            tx_dirty = false;
         }
     }
     db.commit_tx();
