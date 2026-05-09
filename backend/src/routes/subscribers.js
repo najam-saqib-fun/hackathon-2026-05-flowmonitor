@@ -14,15 +14,17 @@ router.get('/', requireAuth, async (req, res) => {
 
     const clauses = [];
     const vals    = [];
+    let i = 1;
     if (search) {
-      clauses.push('(ip_address LIKE ? OR subscriber_id LIKE ? OR name LIKE ?)');
+      clauses.push(`(ip_address LIKE $${i} OR subscriber_id LIKE $${i+1} OR name LIKE $${i+2})`);
       vals.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      i += 3;
     }
     const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
 
     const [rows, countRows] = await Promise.all([
-      query(`SELECT * FROM subscribers ${where} ORDER BY ip_address LIMIT ? OFFSET ?`, [...vals, limit, offset]),
-      query(`SELECT COUNT(*) as total FROM subscribers ${where}`, vals),
+      query(`SELECT * FROM subscribers ${where} ORDER BY ip_address LIMIT $${i} OFFSET $${i+1}`, [...vals, limit, offset]),
+      query(`SELECT COUNT(*)::int AS total FROM subscribers ${where}`, vals),
     ]);
     res.json({ total: countRows[0].total, limit, offset, rows });
   } catch (err) {
@@ -37,14 +39,14 @@ router.post('/', requireAdmin, async (req, res) => {
     if (!ip_address || !subscriber_id) {
       return res.status(400).json({ error: 'ip_address and subscriber_id required' });
     }
-    const result = await query(
-      'INSERT INTO subscribers (ip_address, subscriber_id, name, notes) VALUES (?, ?, ?, ?)',
+    const rows = await query(
+      'INSERT INTO subscribers (ip_address, subscriber_id, name, notes) VALUES ($1, $2, $3, $4) RETURNING id',
       [ip_address, subscriber_id, name || null, notes || null]
     );
     analytics.track('subscriber_created', req.user.username, { ip_address, subscriber_id });
-    res.status(201).json({ id: result.insertId, ip_address, subscriber_id });
+    res.status(201).json({ id: rows[0].id, ip_address, subscriber_id });
   } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'IP address already mapped' });
+    if (err.code === '23505') return res.status(409).json({ error: 'IP address already mapped' });
     res.status(500).json({ error: err.message });
   }
 });
@@ -55,16 +57,16 @@ router.put('/:id', requireAdmin, async (req, res) => {
     const { ip_address, subscriber_id, name, notes } = req.body;
     await query(
       `UPDATE subscribers SET
-        ip_address    = COALESCE(?, ip_address),
-        subscriber_id = COALESCE(?, subscriber_id),
-        name          = COALESCE(?, name),
-        notes         = COALESCE(?, notes)
-       WHERE id = ?`,
+        ip_address    = COALESCE($1, ip_address),
+        subscriber_id = COALESCE($2, subscriber_id),
+        name          = COALESCE($3, name),
+        notes         = COALESCE($4, notes)
+       WHERE id = $5`,
       [ip_address || null, subscriber_id || null, name || null, notes || null, req.params.id]
     );
     res.json({ message: 'Updated' });
   } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'IP address already mapped' });
+    if (err.code === '23505') return res.status(409).json({ error: 'IP address already mapped' });
     res.status(500).json({ error: err.message });
   }
 });
@@ -72,7 +74,7 @@ router.put('/:id', requireAdmin, async (req, res) => {
 // DELETE /api/subscribers/:id
 router.delete('/:id', requireAdmin, async (req, res) => {
   try {
-    await query('DELETE FROM subscribers WHERE id = ?', [req.params.id]);
+    await query('DELETE FROM subscribers WHERE id = $1', [req.params.id]);
     analytics.track('subscriber_deleted', req.user.username, { subscriber_id: req.params.id });
     res.json({ message: 'Deleted' });
   } catch (err) {
@@ -80,7 +82,7 @@ router.delete('/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /api/subscribers/import  — body: { format: 'csv'|'json', data: string }
+// POST /api/subscribers/import
 router.post('/import', requireAdmin, async (req, res) => {
   try {
     const { format = 'csv', data } = req.body;
@@ -106,14 +108,18 @@ router.post('/import', requireAdmin, async (req, res) => {
       const { ip_address, subscriber_id, name, notes } = row;
       if (!ip_address || !subscriber_id) { skipped++; continue; }
       try {
-        const existing = await queryOne('SELECT id FROM subscribers WHERE ip_address = ?', [ip_address]);
+        const existing = await queryOne('SELECT id FROM subscribers WHERE ip_address = $1', [ip_address]);
         if (existing) {
-          await query('UPDATE subscribers SET subscriber_id = ?, name = ?, notes = ? WHERE ip_address = ?',
-            [subscriber_id, name || null, notes || null, ip_address]);
+          await query(
+            'UPDATE subscribers SET subscriber_id = $1, name = $2, notes = $3 WHERE ip_address = $4',
+            [subscriber_id, name || null, notes || null, ip_address]
+          );
           updated++;
         } else {
-          await query('INSERT INTO subscribers (ip_address, subscriber_id, name, notes) VALUES (?, ?, ?, ?)',
-            [ip_address, subscriber_id, name || null, notes || null]);
+          await query(
+            'INSERT INTO subscribers (ip_address, subscriber_id, name, notes) VALUES ($1, $2, $3, $4)',
+            [ip_address, subscriber_id, name || null, notes || null]
+          );
           inserted++;
         }
       } catch { skipped++; }

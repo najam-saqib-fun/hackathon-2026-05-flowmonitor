@@ -4,7 +4,7 @@ const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
-// GET /api/ipdr — list IPDR keys with filters, pagination, sorting
+// GET /api/ipdr
 router.get('/', requireAuth, async (req, res) => {
   try {
     const limit  = Math.min(parseInt(req.query.limit  || '100'), 1000);
@@ -17,12 +17,13 @@ router.get('/', requireAuth, async (req, res) => {
 
     const clauses = [];
     const vals    = [];
-    if (req.query.src_ip)      { clauses.push('k.src_ip = ?');          vals.push(req.query.src_ip); }
-    if (req.query.dst_ip)      { clauses.push('k.dst_ip = ?');          vals.push(req.query.dst_ip); }
-    if (req.query.application) { clauses.push('k.application LIKE ?');  vals.push(`%${req.query.application}%`); }
-    if (req.query.subscriber)  { clauses.push('s.subscriber_id LIKE ?'); vals.push(`%${req.query.subscriber}%`); }
-    if (req.query.status)      { clauses.push('k.status = ?');          vals.push(req.query.status); }
-    if (req.query.key_string)  { clauses.push('k.key_string LIKE ?');   vals.push(`%${req.query.key_string}%`); }
+    let i = 1;
+    if (req.query.src_ip)      { clauses.push(`k.src_ip = $${i++}`);          vals.push(req.query.src_ip); }
+    if (req.query.dst_ip)      { clauses.push(`k.dst_ip = $${i++}`);          vals.push(req.query.dst_ip); }
+    if (req.query.application) { clauses.push(`k.application LIKE $${i++}`);  vals.push(`%${req.query.application}%`); }
+    if (req.query.subscriber)  { clauses.push(`s.subscriber_id LIKE $${i++}`); vals.push(`%${req.query.subscriber}%`); }
+    if (req.query.status)      { clauses.push(`k.status = $${i++}`);          vals.push(req.query.status); }
+    if (req.query.key_string)  { clauses.push(`k.key_string LIKE $${i++}`);   vals.push(`%${req.query.key_string}%`); }
 
     const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
 
@@ -30,21 +31,25 @@ router.get('/', requireAuth, async (req, res) => {
       k.id, k.key_string, k.src_ip, k.dst_ip, k.dst_port, k.application,
       k.packets_sent, k.bytes_sent, k.packets_recv, k.bytes_recv,
       k.first_seen, k.last_seen, k.status,
-      COALESCE(s.subscriber_id, 'unknown') as subscriber_id,
-      COALESCE(s.name, '') as subscriber_name,
-      COALESCE(am.category, '') as application_category`;
+      COALESCE(s.subscriber_id, 'unknown') AS subscriber_id,
+      COALESCE(s.name, '')                 AS subscriber_name,
+      COALESCE(am.category, '')            AS application_category`;
 
     const fromJoin = `FROM ipdr_keys k
       LEFT JOIN subscribers s ON s.ip_address = k.src_ip
       LEFT JOIN application_mappings am ON am.application = k.application
-        AND am.pattern_type IN ('hostname_suffix','hostname_exact','ip_exact','ip_cidr')
         AND am.id = (SELECT MIN(am2.id) FROM application_mappings am2
                      WHERE am2.application = k.application LIMIT 1)`;
 
     const [rows, countRows] = await Promise.all([
-      query(`SELECT ${selectCols} ${fromJoin} ${where} ORDER BY ${sort} ${order} LIMIT ? OFFSET ?`,
-            [...vals, limit, offset]),
-      query(`SELECT COUNT(*) as total FROM ipdr_keys k LEFT JOIN subscribers s ON s.ip_address = k.src_ip ${where}`, vals),
+      query(
+        `SELECT ${selectCols} ${fromJoin} ${where} ORDER BY ${sort} ${order} LIMIT $${i} OFFSET $${i + 1}`,
+        [...vals, limit, offset]
+      ),
+      query(
+        `SELECT COUNT(*)::int AS total FROM ipdr_keys k LEFT JOIN subscribers s ON s.ip_address = k.src_ip ${where}`,
+        vals
+      ),
     ]);
 
     res.json({ total: countRows[0].total, limit, offset, rows });
@@ -53,7 +58,7 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
-// GET /api/ipdr/:id/flows — get all flows for an IPDR key
+// GET /api/ipdr/:id/flows
 router.get('/:id/flows', requireAuth, async (req, res) => {
   try {
     const rows = await query(`
@@ -61,15 +66,15 @@ router.get('/:id/flows', requireAuth, async (req, res) => {
              f.application, f.start_time, f.end_time, f.flow_duration_ms,
              f.packet_sent, f.packet_recv, f.bytes_sent, f.bytes_recv,
              f.total_packets, f.total_bytes, f.hostnames, f.urls, f.metadata,
-             COALESCE(s.subscriber_id, 'unknown') as subscriber_id,
-             COALESCE(am.category, '') as application_category
+             COALESCE(s.subscriber_id, 'unknown') AS subscriber_id,
+             COALESCE(am.category, '')            AS application_category
       FROM flows f
       LEFT JOIN subscribers s ON s.ip_address = f.src_ip
       LEFT JOIN (
         SELECT application, MIN(category) AS category
         FROM application_mappings GROUP BY application
       ) am ON am.application = f.application
-      WHERE f.ipdr_key_id = ?
+      WHERE f.ipdr_key_id = $1
       ORDER BY f.start_time DESC
       LIMIT 500
     `, [req.params.id]);

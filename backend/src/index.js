@@ -11,21 +11,28 @@ const { app, server } = require('./app');
 
 const PORT = parseInt(process.env.PORT || '3000');
 
-getPool()
-  .then(() => {
-    createWsServer(server);
-    server.listen(PORT, () => {
-      logger.info('FlowMon API started', {
-        port: PORT,
-        rest: `http://localhost:${PORT}/api`,
-        ws: `ws://localhost:${PORT}/ws?token=<jwt>`,
-      });
-    });
-  })
-  .catch((err) => {
-    logger.error('Failed to connect to database — aborting startup', { err: err.message });
-    process.exit(1);
+// Start HTTP server immediately so the healthcheck passes on Railway/Vercel.
+// DB connection happens asynchronously in the background with retries.
+server.listen(PORT, () => {
+  logger.info('FlowMon API started', {
+    port: PORT,
+    rest: `http://localhost:${PORT}/api`,
+    ws: `ws://localhost:${PORT}/ws?token=<jwt>`,
   });
+});
+
+async function initDb(attempt = 1) {
+  try {
+    await getPool();
+    createWsServer(server);
+    logger.info('Database connected and WebSocket server ready');
+  } catch (err) {
+    const delay = Math.min(5000 * attempt, 60000);
+    logger.error('Database connection failed — retrying', { attempt, delay_ms: delay, err: err.message });
+    setTimeout(() => initDb(attempt + 1), delay);
+  }
+}
+initDb();
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
@@ -36,3 +43,4 @@ process.on('SIGTERM', async () => {
     process.exit(0);
   });
 });
+

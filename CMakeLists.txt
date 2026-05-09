@@ -13,32 +13,40 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PCAP REQUIRED libpcap)
 
-# MySQL client. Try mysqlclient first (libmysqlclient-dev), then libmariadb.
-# As a last resort fall back to invoking mysql_config(1).
-pkg_check_modules(MYSQL mysqlclient)
-if(NOT MYSQL_FOUND)
-    pkg_check_modules(MYSQL libmariadb)
-endif()
-if(NOT MYSQL_FOUND)
-    find_program(MYSQL_CONFIG mysql_config mariadb_config)
-    if(MYSQL_CONFIG)
-        execute_process(COMMAND ${MYSQL_CONFIG} --include
-            OUTPUT_VARIABLE _mc_inc OUTPUT_STRIP_TRAILING_WHITESPACE)
-        execute_process(COMMAND ${MYSQL_CONFIG} --libs
-            OUTPUT_VARIABLE _mc_libs OUTPUT_STRIP_TRAILING_WHITESPACE)
-        separate_arguments(_mc_inc UNIX_COMMAND "${_mc_inc}")
-        separate_arguments(_mc_libs UNIX_COMMAND "${_mc_libs}")
-        foreach(f IN LISTS _mc_inc)
-            string(REGEX REPLACE "^-I" "" f "${f}")
-            list(APPEND MYSQL_INCLUDE_DIRS "${f}")
-        endforeach()
-        set(MYSQL_LIBRARIES "${_mc_libs}")
-        set(MYSQL_FOUND TRUE)
+# PostgreSQL client (libpq). Try pkg-config first, then CMake's FindPostgreSQL,
+# then a manual header/library search (useful when only the runtime .so is
+# installed without the -dev package).
+pkg_check_modules(LIBPQ libpq)
+if(NOT LIBPQ_FOUND)
+    find_package(PostgreSQL QUIET)
+    if(PostgreSQL_FOUND)
+        set(LIBPQ_INCLUDE_DIRS ${PostgreSQL_INCLUDE_DIRS})
+        set(LIBPQ_LIBRARIES    ${PostgreSQL_LIBRARIES})
+        set(LIBPQ_LIBRARY_DIRS "")
+        set(LIBPQ_FOUND TRUE)
     endif()
 endif()
-if(NOT MYSQL_FOUND)
+if(NOT LIBPQ_FOUND)
+    find_path(LIBPQ_INCLUDE_DIR
+        NAMES libpq-fe.h
+        PATHS /usr/include /usr/local/include /usr/include/postgresql
+              /usr/local/include/postgresql /opt/homebrew/include
+    )
+    find_library(LIBPQ_LIBRARY
+        NAMES pq
+        PATHS /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu
+              /usr/lib/aarch64-linux-gnu /opt/homebrew/lib
+    )
+    if(LIBPQ_INCLUDE_DIR AND LIBPQ_LIBRARY)
+        set(LIBPQ_INCLUDE_DIRS ${LIBPQ_INCLUDE_DIR})
+        set(LIBPQ_LIBRARIES    ${LIBPQ_LIBRARY})
+        set(LIBPQ_LIBRARY_DIRS "")
+        set(LIBPQ_FOUND TRUE)
+    endif()
+endif()
+if(NOT LIBPQ_FOUND)
     message(FATAL_ERROR
-        "MySQL/MariaDB client library not found. Install libmysqlclient-dev or libmariadb-dev.")
+        "libpq not found. Install libpq-dev (Debian/Ubuntu) or postgresql-devel (RHEL/Fedora).")
 endif()
 
 # nDPI sometimes ships a libndpi.pc, sometimes not. Try pkg-config first;
@@ -90,17 +98,17 @@ target_include_directories(flow_monitor PRIVATE
     src
     ${NDPI_INCLUDE_DIRS}
     ${NDPI_PARENT_INCLUDES}
-    ${MYSQL_INCLUDE_DIRS}
+    ${LIBPQ_INCLUDE_DIRS}
     ${PCAP_INCLUDE_DIRS}
 )
 target_link_directories(flow_monitor PRIVATE
     ${NDPI_LIBRARY_DIRS}
-    ${MYSQL_LIBRARY_DIRS}
+    ${LIBPQ_LIBRARY_DIRS}
     ${PCAP_LIBRARY_DIRS}
 )
 target_link_libraries(flow_monitor PRIVATE
     ${NDPI_LIBRARIES}
-    ${MYSQL_LIBRARIES}
+    ${LIBPQ_LIBRARIES}
     ${PCAP_LIBRARIES}
     pthread
 )

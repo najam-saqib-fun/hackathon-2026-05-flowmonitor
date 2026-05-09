@@ -4,7 +4,7 @@ const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
-// GET /api/domains  — hostnames linked to flows + subscribers
+// GET /api/domains
 router.get('/', requireAuth, async (req, res) => {
   try {
     const limit   = Math.min(parseInt(req.query.limit  || '100'), 1000);
@@ -16,11 +16,12 @@ router.get('/', requireAuth, async (req, res) => {
 
     const clauses = [];
     const vals    = [];
+    let i = 1;
 
-    if (search)  { clauses.push('h.hostname LIKE ?');  vals.push(`%${search}%`); }
-    if (src_ip)  { clauses.push('f.src_ip = ?');       vals.push(src_ip); }
-    if (start)   { clauses.push('h.first_seen >= ?');  vals.push(start); }
-    if (end)     { clauses.push('h.last_seen <= ?');   vals.push(end); }
+    if (search)  { clauses.push(`h.hostname LIKE $${i++}`);  vals.push(`%${search}%`); }
+    if (src_ip)  { clauses.push(`f.src_ip = $${i++}`);       vals.push(src_ip); }
+    if (start)   { clauses.push(`h.first_seen >= $${i++}`);  vals.push(start); }
+    if (end)     { clauses.push(`h.last_seen <= $${i++}`);   vals.push(end); }
 
     const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
 
@@ -29,18 +30,18 @@ router.get('/', requireAuth, async (req, res) => {
         `SELECT h.id, h.hostname, h.flow_id, h.first_seen, h.last_seen, h.resolution_count,
                 f.src_ip, f.dst_ip, f.src_port, f.dst_port, f.protocol,
                 f.application,
-                COALESCE(s.subscriber_id, 'unknown') as subscriber_id,
-                COALESCE(s.name, '') as subscriber_name
+                COALESCE(s.subscriber_id, 'unknown') AS subscriber_id,
+                COALESCE(s.name, '') AS subscriber_name
          FROM hostnames h
-         LEFT JOIN flows f      ON f.id = h.flow_id
+         LEFT JOIN flows f       ON f.id = h.flow_id
          LEFT JOIN subscribers s ON s.ip_address = f.src_ip
          ${where}
          ORDER BY h.resolution_count DESC, h.last_seen DESC
-         LIMIT ? OFFSET ?`,
+         LIMIT $${i} OFFSET $${i + 1}`,
         [...vals, limit, offset]
       ),
       query(
-        `SELECT COUNT(*) as total
+        `SELECT COUNT(*)::int AS total
          FROM hostnames h
          LEFT JOIN flows f ON f.id = h.flow_id
          ${where}`,
@@ -54,7 +55,7 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
-// GET /api/domains/chart  — top N domains by occurrence for bar chart
+// GET /api/domains/chart
 router.get('/chart', requireAuth, async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit || '20'), 100);
@@ -63,21 +64,22 @@ router.get('/chart', requireAuth, async (req, res) => {
 
     const clauses = [];
     const vals    = [];
-    if (start) { clauses.push('h.first_seen >= ?'); vals.push(start); }
-    if (end)   { clauses.push('h.last_seen <= ?');  vals.push(end); }
+    let i = 1;
+    if (start) { clauses.push(`h.first_seen >= $${i++}`); vals.push(start); }
+    if (end)   { clauses.push(`h.last_seen <= $${i++}`);  vals.push(end); }
     const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
 
     const rows = await query(
       `SELECT h.hostname,
-              COUNT(*) as occurrences,
-              SUM(h.resolution_count) as total_resolutions,
-              COUNT(DISTINCT f.src_ip) as unique_sources
+              COUNT(*)::int                AS occurrences,
+              SUM(h.resolution_count)      AS total_resolutions,
+              COUNT(DISTINCT f.src_ip)::int AS unique_sources
        FROM hostnames h
        LEFT JOIN flows f ON f.id = h.flow_id
        ${where}
        GROUP BY h.hostname
        ORDER BY occurrences DESC
-       LIMIT ?`,
+       LIMIT $${i}`,
       [...vals, limit]
     );
     res.json(rows);
@@ -86,14 +88,14 @@ router.get('/chart', requireAuth, async (req, res) => {
   }
 });
 
-// GET /api/domains/unique-sources — unique source IPs for filter dropdown
+// GET /api/domains/unique-sources
 router.get('/unique-sources', requireAuth, async (req, res) => {
   try {
     const rows = await query(
       `SELECT DISTINCT f.src_ip,
-              COALESCE(s.subscriber_id, 'unknown') as subscriber_id
+              COALESCE(s.subscriber_id, 'unknown') AS subscriber_id
        FROM hostnames h
-       LEFT JOIN flows f ON f.id = h.flow_id
+       LEFT JOIN flows f       ON f.id = h.flow_id
        LEFT JOIN subscribers s ON s.ip_address = f.src_ip
        WHERE f.src_ip IS NOT NULL
        ORDER BY f.src_ip

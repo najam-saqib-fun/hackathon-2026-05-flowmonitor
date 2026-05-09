@@ -3,9 +3,9 @@
 // Background service that listens on a Unix socket, ingests packet messages
 // from pcap_processor, aggregates them into bidirectional flows, runs nDPI
 // for application/category detection, and persists completed flows into a
-// MySQL/MariaDB database. Flows that go silent for `flow_timeout` seconds
-// are flushed automatically; on SIGINT/SIGTERM all in-memory flows are
-// flushed and the process exits cleanly.
+// PostgreSQL/Supabase database. Flows that go silent for `flow_timeout`
+// seconds are flushed automatically; on SIGINT/SIGTERM all in-memory flows
+// are flushed and the process exits cleanly.
 
 #include "common.h"
 #include "md5.h"
@@ -13,7 +13,7 @@
 #include <ndpi/ndpi_api.h>
 #include <ndpi/ndpi_main.h>
 #include <ndpi/ndpi_typedefs.h>
-#include <mysql/mysql.h>
+#include <libpq-fe.h>
 #include <pcap/pcap.h>
 
 #include <arpa/inet.h>
@@ -67,14 +67,9 @@ struct Config {
     std::string interface;
     std::string bpf_filter;
 
-    // MySQL/MariaDB connection. An empty mysql_socket means use TCP to
-    // (mysql_host, mysql_port). The database is auto-created if missing.
-    std::string mysql_host   = "127.0.0.1";
-    int         mysql_port   = 3306;
-    std::string mysql_user   = "root";
-    std::string mysql_pass   = "Najam123!";
-    std::string mysql_db     = "flowmon";
-    std::string mysql_socket;  // optional unix-socket path
+    // PostgreSQL / Supabase connection string.
+    // Format: postgresql://user:pass@host:5432/dbname?sslmode=require
+    std::string pg_dsn = "postgresql://postgres:password@localhost:5432/flowmon";
 
     int flow_timeout_seconds = 60;
     int sync_interval_seconds = 5;   // real-time sync every 5s; 0 disables
@@ -137,12 +132,7 @@ static bool load_config(const std::string& path, Config& cfg) {
     find_string("socket_path", cfg.socket_path);
     find_string("interface",   cfg.interface);
     find_string("bpf_filter",  cfg.bpf_filter);
-    find_string("mysql_host", cfg.mysql_host);
-    find_int   ("mysql_port", cfg.mysql_port);
-    find_string("mysql_user", cfg.mysql_user);
-    find_string("mysql_pass", cfg.mysql_pass);
-    find_string("mysql_db",   cfg.mysql_db);
-    find_string("mysql_socket", cfg.mysql_socket);
+    find_string("pg_dsn", cfg.pg_dsn);
     find_int("flow_timeout_seconds", cfg.flow_timeout_seconds);
     find_int("sync_interval_seconds", cfg.sync_interval_seconds);
     find_int("ndpi_max_packets", cfg.ndpi_max_packets);
@@ -907,100 +897,44 @@ private:
 };
 
 // ============================================================================
-// Database wrapper (MySQL / MariaDB)
+// Database wrapper (PostgreSQL / Supabase)
 // ============================================================================
 class FlowDB {
 public:
     bool open(const Config& cfg) {
-        if (mysql_library_init(0, nullptr, nullptr) != 0) {
-            std::fprintf(stderr, "mysql_library_init failed\n");
+        conn_ = PQconnectdb(cfg.pg_dsn.c_str());
+        if (PQstatus(conn_) != CONNECTION_OK) {
+            std::fprintf(stderr, "PQconnectdb failed: %s\n", PQerrorMessage(conn_));
+            PQfinish(conn_);
+            conn_ = nullptr;
             return false;
         }
-        conn_ = mysql_init(nullptr);
-        if (!conn_) {
-            std::fprintf(stderr, "mysql_init failed\n");
-            return false;
-        }
-        mysql_options(conn_, MYSQL_SET_CHARSET_NAME, "utf8mb4");
-
-        // Auto-reconnect on lost connection (my_bool removed in MySQL 8; use bool).
-        bool reconnect = true;
-        mysql_options(conn_, MYSQL_OPT_RECONNECT, &reconnect);
-
-        // TCP keepalive so Railway's load-balancer doesn't silently drop the
-        // idle connection between sync intervals.
-        unsigned int connect_timeout = 10;
-        mysql_options(conn_, MYSQL_OPT_CONNECT_TIMEOUT, &connect_timeout);
-
-        const char* sock = cfg.mysql_socket.empty() ? nullptr : cfg.mysql_socket.c_str();
-        // Connect with no default DB so we can CREATE DATABASE first.
-        // CLIENT_MULTI_STATEMENTS is intentionally omitted: Railway's TCP proxy
-        // mishandles the multi-result protocol flags, corrupting the connection
-        // after the first sync. Each statement is sent individually instead.
-        if (!mysql_real_connect(conn_,
-                                cfg.mysql_host.c_str(),
-                                cfg.mysql_user.c_str(),
-                                cfg.mysql_pass.empty() ? nullptr : cfg.mysql_pass.c_str(),
-                                nullptr,
-                                static_cast<unsigned>(cfg.mysql_port),
-                                sock,
-                                0)) {
-            std::fprintf(stderr, "mysql_real_connect failed: %s\n", mysql_error(conn_));
-            return false;
-        }
-
-        std::string create_db =
-            "CREATE DATABASE IF NOT EXISTS `" + escape(cfg.mysql_db) +
-            "` DEFAULT CHARACTER SET utf8mb4 DEFAULT COLLATE utf8mb4_unicode_ci";
-        if (!exec(create_db.c_str())) return false;
-
-        if (mysql_select_db(conn_, cfg.mysql_db.c_str()) != 0) {
-            std::fprintf(stderr, "mysql_select_db(%s) failed: %s\n",
-                         cfg.mysql_db.c_str(), mysql_error(conn_));
-            return false;
-        }
-        db_name_ = cfg.mysql_db;
-
-        /*
-        commented out  : because the schema already exists in the repo, and we don't want to create it every time we run the program
         if (!create_schema()) return false;
         if (!seed_app_mappings()) return false;
-        
-        */
         return true;
     }
 
     void close() {
         if (conn_) {
-            mysql_close(conn_);
+            PQfinish(conn_);
             conn_ = nullptr;
         }
-        mysql_library_end();
     }
 
-    void begin_tx()  { exec("START TRANSACTION"); }
+    void begin_tx()  { exec("BEGIN"); }
     void commit_tx() { exec("COMMIT"); }
 
-    // Ping the server and reconnect if the connection was dropped by the
-    // remote TCP proxy (common with cloud MySQL like Railway).
     bool ping_reconnect() {
-        if (mysql_ping(conn_) == 0) return true;
+        if (PQstatus(conn_) == CONNECTION_OK) return true;
         std::fprintf(stderr, "[db] reconnecting after lost connection\n");
-        if (mysql_ping(conn_) != 0) {
-            std::fprintf(stderr, "[db] reconnect failed: %s\n", mysql_error(conn_));
-            return false;
-        }
-        // Re-select the database after reconnect (session reset clears USE).
-        if (mysql_select_db(conn_, db_name_.c_str()) != 0) {
-            std::fprintf(stderr, "[db] mysql_select_db after reconnect failed: %s\n",
-                         mysql_error(conn_));
+        PQreset(conn_);
+        if (PQstatus(conn_) != CONNECTION_OK) {
+            std::fprintf(stderr, "[db] reconnect failed: %s\n", PQerrorMessage(conn_));
             return false;
         }
         return true;
     }
 
-    // Build a properly-escaped string literal: returns "NULL" if empty,
-    // otherwise "'<escaped>'".
     std::string quote_or_null(const std::string& s) {
         if (s.empty()) return "NULL";
         return "'" + escape(s) + "'";
@@ -1042,8 +976,7 @@ public:
             meta << ",\"quic_version\":" << f.quic_version;
         meta << "}";
 
-        // The `id = LAST_INSERT_ID(id)` trick lets us get the row id back via
-        // mysql_insert_id() whether the row was newly inserted OR updated.
+        // ON CONFLICT (flow_hash) DO UPDATE always returns the row id via RETURNING
         std::ostringstream q;
         q << "INSERT INTO flows ("
           << "  flow_hash, src_ip, dst_ip, src_port, dst_port, protocol,"
@@ -1064,25 +997,25 @@ public:
           << "'" << escape(urls_json) << "',"
           << "'" << escape(hosts_json) << "',"
           << "'" << escape(meta.str()) << "'"
-          << ") ON DUPLICATE KEY UPDATE "
-          << "  id = LAST_INSERT_ID(id),"
-          << "  src_ip = VALUES(src_ip), dst_ip = VALUES(dst_ip),"
-          << "  src_port = VALUES(src_port), dst_port = VALUES(dst_port),"
-          << "  application = VALUES(application),"
-          << "  end_time = VALUES(end_time),"
-          << "  flow_duration_ms = VALUES(flow_duration_ms),"
-          << "  packet_sent = VALUES(packet_sent),"
-          << "  packet_recv = VALUES(packet_recv),"
-          << "  bytes_sent = VALUES(bytes_sent),"
-          << "  bytes_recv = VALUES(bytes_recv),"
-          << "  urls = VALUES(urls),"
-          << "  hostnames = VALUES(hostnames),"
-          << "  metadata = VALUES(metadata),"
-          << "  updated_at = CURRENT_TIMESTAMP";
+          << ") ON CONFLICT (flow_hash) DO UPDATE SET "
+          << "  src_ip           = EXCLUDED.src_ip,"
+          << "  dst_ip           = EXCLUDED.dst_ip,"
+          << "  src_port         = EXCLUDED.src_port,"
+          << "  dst_port         = EXCLUDED.dst_port,"
+          << "  application      = EXCLUDED.application,"
+          << "  end_time         = EXCLUDED.end_time,"
+          << "  flow_duration_ms = EXCLUDED.flow_duration_ms,"
+          << "  packet_sent      = EXCLUDED.packet_sent,"
+          << "  packet_recv      = EXCLUDED.packet_recv,"
+          << "  bytes_sent       = EXCLUDED.bytes_sent,"
+          << "  bytes_recv       = EXCLUDED.bytes_recv,"
+          << "  urls             = EXCLUDED.urls,"
+          << "  hostnames        = EXCLUDED.hostnames,"
+          << "  metadata         = EXCLUDED.metadata,"
+          << "  updated_at       = NOW()"
+          << " RETURNING id";
 
-        if (!exec(q.str().c_str())) return 0;
-
-        const uint64_t flow_id = static_cast<uint64_t>(mysql_insert_id(conn_));
+        const uint64_t flow_id = exec_with_id(q.str().c_str());
 
         if (flow_id != 0) {
             for (const std::string& host : f.hostnames) {
@@ -1092,26 +1025,26 @@ public:
                   << flow_id << ","
                   << "'" << escape(start) << "',"
                   << "'" << escape(end)   << "',"
-                  << "1)";
+                  << "1) ON CONFLICT DO NOTHING";
                 exec(h.str().c_str());
             }
 
             for (const std::string& url : f.urls) {
-                std::string proto, host, path, query;
-                parse_url(url, proto, host, path, query);
+                std::string proto, host, path, qstr;
+                parse_url(url, proto, host, path, qstr);
                 std::ostringstream u;
                 u << "INSERT INTO urls (url, host, path, query_params, protocol, flow_id, first_seen, last_seen, access_count) VALUES ("
                   << "'" << escape(url) << "',"
                   << quote_or_null(host) << ","
                   << quote_or_null(path) << ","
-                  << quote_or_null(query) << ","
+                  << quote_or_null(qstr) << ","
                   << quote_or_null(proto) << ","
                   << flow_id << ","
                   << "'" << escape(start) << "',"
                   << "'" << escape(end)   << "',"
-                  << "1) ON DUPLICATE KEY UPDATE "
-                  << "  last_seen = VALUES(last_seen),"
-                  << "  access_count = access_count + 1";
+                  << "1) ON CONFLICT (url, flow_id) DO UPDATE SET "
+                  << "  last_seen    = EXCLUDED.last_seen,"
+                  << "  access_count = urls.access_count + 1";
                 exec(u.str().c_str());
             }
         }
@@ -1119,8 +1052,7 @@ public:
         return flow_id;
     }
 
-    // Called once per finalized flow (not on sync_active upserts) to avoid
-    // double-counting bytes/packets in the summary.
+    // Called once per finalized flow to update aggregate stats.
     void update_app_summary(const Flow& f) {
         if (f.application.empty() || f.application == "Unknown") return;
         const std::string start    = format_timestamp(f.start_time_us);
@@ -1142,53 +1074,53 @@ public:
           << duration_ms    << ","
           << "'" << escape(start) << "',"
           << "'" << escape(end)   << "',"
-          << "CURRENT_TIMESTAMP"
-          << ") ON DUPLICATE KEY UPDATE "
-          << "  category = COALESCE(VALUES(category), category),"
-          << "  total_flows = total_flows + 1,"
-          << "  total_packets_sent = total_packets_sent + VALUES(total_packets_sent),"
-          << "  total_packets_recv = total_packets_recv + VALUES(total_packets_recv),"
-          << "  total_bytes_sent  = total_bytes_sent  + VALUES(total_bytes_sent),"
-          << "  total_bytes_recv  = total_bytes_recv  + VALUES(total_bytes_recv),"
-          << "  total_duration_ms = total_duration_ms + VALUES(total_duration_ms),"
-          << "  first_seen = LEAST(IFNULL(first_seen, VALUES(first_seen)), VALUES(first_seen)),"
-          << "  last_seen  = GREATEST(IFNULL(last_seen, VALUES(last_seen)), VALUES(last_seen)),"
-          << "  last_updated = CURRENT_TIMESTAMP";
+          << "NOW()"
+          << ") ON CONFLICT (application) DO UPDATE SET "
+          << "  category           = COALESCE(EXCLUDED.category, applications_summary.category),"
+          << "  total_flows        = applications_summary.total_flows + 1,"
+          << "  total_packets_sent = applications_summary.total_packets_sent + EXCLUDED.total_packets_sent,"
+          << "  total_packets_recv = applications_summary.total_packets_recv + EXCLUDED.total_packets_recv,"
+          << "  total_bytes_sent   = applications_summary.total_bytes_sent   + EXCLUDED.total_bytes_sent,"
+          << "  total_bytes_recv   = applications_summary.total_bytes_recv   + EXCLUDED.total_bytes_recv,"
+          << "  total_duration_ms  = applications_summary.total_duration_ms  + EXCLUDED.total_duration_ms,"
+          << "  first_seen   = LEAST(COALESCE(applications_summary.first_seen, EXCLUDED.first_seen), EXCLUDED.first_seen),"
+          << "  last_seen    = GREATEST(COALESCE(applications_summary.last_seen, EXCLUDED.last_seen), EXCLUDED.last_seen),"
+          << "  last_updated = NOW()";
         exec(a.str().c_str());
     }
 
-    // Loads capture_policy as an allowlist into 'allowed' and sets
-    // policy_active=true when any rows exist.  Empty table → capture all.
+    // Loads capture_policy as an allowlist; sets policy_active=true when any rows exist.
     bool load_capture_policy(std::unordered_set<std::string>& allowed,
                              bool& policy_active) {
         allowed.clear();
         policy_active = false;
-        MYSQL_RES* cnt_res = nullptr;
-        if (mysql_query(conn_, "SELECT COUNT(*) FROM capture_policy") == 0)
-            cnt_res = mysql_store_result(conn_);
-        if (!cnt_res) return true;
-        MYSQL_ROW cnt_row = mysql_fetch_row(cnt_res);
-        const long total = cnt_row ? std::atol(cnt_row[0]) : 0;
-        mysql_free_result(cnt_res);
-        if (total == 0) return true; // empty policy → capture all
-        policy_active = true;
-        if (mysql_query(conn_, "SELECT application FROM capture_policy WHERE enabled=1") != 0)
-            return false;
-        MYSQL_RES* res = mysql_store_result(conn_);
-        if (!res) return false;
-        MYSQL_ROW row;
-        while ((row = mysql_fetch_row(res))) {
-            if (row[0]) allowed.insert(row[0]);
+
+        PGresult* cnt_res = PQexec(conn_, "SELECT COUNT(*) FROM capture_policy");
+        if (PQresultStatus(cnt_res) != PGRES_TUPLES_OK) {
+            PQclear(cnt_res);
+            return true; // table may not exist yet; treat as empty → capture all
         }
-        mysql_free_result(res);
+        const long total = std::atol(PQgetvalue(cnt_res, 0, 0));
+        PQclear(cnt_res);
+        if (total == 0) return true;
+
+        policy_active = true;
+        PGresult* res = PQexec(conn_, "SELECT application FROM capture_policy WHERE enabled = TRUE");
+        if (PQresultStatus(res) != PGRES_TUPLES_OK) { PQclear(res); return false; }
+        const int nrows = PQntuples(res);
+        for (int i = 0; i < nrows; ++i) {
+            const char* val = PQgetvalue(res, i, 0);
+            if (val && val[0] != '\0') allowed.insert(val);
+        }
+        PQclear(res);
         return true;
     }
 
     uint64_t ipdr_create(const Flow& f, const std::string& key_str) {
-        std::string ts_first = format_timestamp(f.start_time_us);
-        std::string ts_last  = format_timestamp(f.last_packet_time_us);
+        const std::string ts_first = format_timestamp(f.start_time_us);
+        const std::string ts_last  = format_timestamp(f.last_packet_time_us);
         std::ostringstream q;
-        q << "INSERT IGNORE INTO ipdr_keys "
+        q << "INSERT INTO ipdr_keys "
           << "(key_string, src_ip, dst_ip, dst_port, application,"
           << " packets_sent, bytes_sent, packets_recv, bytes_recv,"
           << " first_seen, last_seen, status) VALUES ("
@@ -1201,13 +1133,14 @@ public:
           << f.packets_recv << "," << f.bytes_recv << ","
           << "'" << escape(ts_first) << "',"
           << "'" << escape(ts_last)  << "',"
-          << "'active')";
-        if (!exec(q.str().c_str())) return 0;
-        return static_cast<uint64_t>(mysql_insert_id(conn_));
+          << "'active')"
+          << " ON CONFLICT (key_string) DO NOTHING"
+          << " RETURNING id";
+        return exec_with_id(q.str().c_str());
     }
 
     void ipdr_update(uint64_t id, const Flow& f) {
-        std::string ts_last = format_timestamp(f.last_packet_time_us);
+        const std::string ts_last = format_timestamp(f.last_packet_time_us);
         std::ostringstream q;
         q << "UPDATE ipdr_keys SET "
           << "packets_sent = packets_sent + " << f.packets_sent << ","
@@ -1232,182 +1165,201 @@ public:
     }
 
 private:
-    MYSQL* conn_ = nullptr;
-    std::string db_name_;
+    PGconn* conn_ = nullptr;
 
     std::string escape(const std::string& s) {
-        if (!conn_) return s;
-        std::string out;
-        out.resize(s.size() * 2 + 1);
-        unsigned long n = mysql_real_escape_string(conn_, &out[0], s.data(), s.size());
-        out.resize(n);
-        return out;
+        if (!conn_ || s.empty()) return s;
+        std::vector<char> buf(s.size() * 2 + 1);
+        int error = 0;
+        size_t n = PQescapeStringConn(conn_, buf.data(), s.c_str(), s.size(), &error);
+        return std::string(buf.data(), n);
     }
 
     bool exec(const char* sql) {
-        if (mysql_query(conn_, sql) != 0) {
-            std::fprintf(stderr, "MySQL error: %s\n  SQL: %.300s\n",
-                         mysql_error(conn_), sql);
-            return false;
+        PGresult* res = PQexec(conn_, sql);
+        const ExecStatusType st = PQresultStatus(res);
+        const bool ok = (st == PGRES_COMMAND_OK || st == PGRES_TUPLES_OK);
+        if (!ok) {
+            std::fprintf(stderr, "PG error: %s  SQL: %.300s\n",
+                         PQerrorMessage(conn_), sql);
         }
-        MYSQL_RES* res = mysql_store_result(conn_);
-        if (res) mysql_free_result(res);
-        return true;
+        PQclear(res);
+        return ok;
+    }
+
+    // Execute SQL that returns one row with one integer column (e.g. RETURNING id).
+    uint64_t exec_with_id(const char* sql) {
+        PGresult* res = PQexec(conn_, sql);
+        uint64_t id = 0;
+        if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0) {
+            const char* val = PQgetvalue(res, 0, 0);
+            if (val && val[0] != '\0')
+                id = static_cast<uint64_t>(std::stoull(val));
+        } else if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+            std::fprintf(stderr, "PG exec_with_id error: %s  SQL: %.300s\n",
+                         PQerrorMessage(conn_), sql);
+        }
+        PQclear(res);
+        return id;
     }
 
     bool create_schema() {
-        // Each statement is sent individually — CLIENT_MULTI_STATEMENTS is not
-        // used, so we cannot batch these into one mysql_query() call.
+        if (!exec(
+            "CREATE OR REPLACE FUNCTION update_updated_at_column() "
+            "RETURNS TRIGGER LANGUAGE plpgsql AS $func$ "
+            "BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $func$"
+        )) return false;
+
         if (!exec(
             "CREATE TABLE IF NOT EXISTS flows ("
-            "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
-            "  flow_hash CHAR(32) NOT NULL,"
-            "  src_ip VARCHAR(45) NOT NULL,"
-            "  dst_ip VARCHAR(45) NOT NULL,"
-            "  src_port INT UNSIGNED NOT NULL,"
-            "  dst_port INT UNSIGNED NOT NULL,"
-            "  protocol SMALLINT UNSIGNED NOT NULL,"
-            "  application VARCHAR(255),"
-            "  application_category VARCHAR(255),"
-            "  start_time DATETIME(6) NOT NULL,"
-            "  end_time   DATETIME(6),"
-            "  flow_duration_ms DOUBLE,"
-            "  packet_sent BIGINT UNSIGNED DEFAULT 0,"
-            "  packet_recv BIGINT UNSIGNED DEFAULT 0,"
-            "  bytes_sent  BIGINT UNSIGNED DEFAULT 0,"
-            "  bytes_recv  BIGINT UNSIGNED DEFAULT 0,"
-            "  total_packets BIGINT UNSIGNED GENERATED ALWAYS AS (packet_sent + packet_recv) STORED,"
-            "  total_bytes   BIGINT UNSIGNED GENERATED ALWAYS AS (bytes_sent + bytes_recv) STORED,"
-            "  urls      TEXT,"
-            "  hostnames TEXT,"
-            "  metadata  TEXT,"
-            "  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
-            "  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
-            "  UNIQUE KEY uk_flow_hash (flow_hash),"
-            "  KEY idx_flow_times (start_time, end_time),"
-            "  KEY idx_flow_app   (application),"
-            "  KEY idx_flow_ips   (src_ip, dst_ip),"
-            "  KEY idx_flow_ports (src_port, dst_port),"
-            "  KEY idx_flow_duration (flow_duration_ms)"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            "  id             BIGSERIAL        PRIMARY KEY,"
+            "  flow_hash      CHAR(32)         NOT NULL,"
+            "  src_ip         VARCHAR(45)      NOT NULL,"
+            "  dst_ip         VARCHAR(45)      NOT NULL,"
+            "  src_port       INTEGER          NOT NULL,"
+            "  dst_port       INTEGER          NOT NULL,"
+            "  protocol       SMALLINT         NOT NULL,"
+            "  application    VARCHAR(255),"
+            "  start_time     TIMESTAMPTZ      NOT NULL,"
+            "  end_time       TIMESTAMPTZ,"
+            "  flow_duration_ms DOUBLE PRECISION,"
+            "  packet_sent    BIGINT           DEFAULT 0,"
+            "  packet_recv    BIGINT           DEFAULT 0,"
+            "  bytes_sent     BIGINT           DEFAULT 0,"
+            "  bytes_recv     BIGINT           DEFAULT 0,"
+            "  total_packets  BIGINT GENERATED ALWAYS AS (packet_sent + packet_recv) STORED,"
+            "  total_bytes    BIGINT GENERATED ALWAYS AS (bytes_sent  + bytes_recv)  STORED,"
+            "  urls           TEXT,"
+            "  hostnames      TEXT,"
+            "  metadata       TEXT,"
+            "  ipdr_key_id    BIGINT,"
+            "  created_at     TIMESTAMPTZ      DEFAULT NOW(),"
+            "  updated_at     TIMESTAMPTZ      DEFAULT NOW(),"
+            "  UNIQUE(flow_hash)"
+            ")"
         )) return false;
+
+        exec("CREATE INDEX IF NOT EXISTS idx_flow_times ON flows(start_time, end_time)");
+        exec("CREATE INDEX IF NOT EXISTS idx_flow_app   ON flows(application)");
+        exec("CREATE INDEX IF NOT EXISTS idx_flow_ips   ON flows(src_ip, dst_ip)");
+        exec("CREATE INDEX IF NOT EXISTS idx_flow_ports ON flows(src_port, dst_port)");
+        exec("CREATE INDEX IF NOT EXISTS idx_flow_ipdr  ON flows(ipdr_key_id)");
+        exec("CREATE INDEX IF NOT EXISTS idx_flow_upd   ON flows(updated_at)");
+        exec(
+            "CREATE OR REPLACE TRIGGER update_flows_updated_at "
+            "BEFORE UPDATE ON flows "
+            "FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()"
+        );
 
         if (!exec(
             "CREATE TABLE IF NOT EXISTS urls ("
-            "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
-            "  url VARCHAR(2048) NOT NULL,"
-            "  host VARCHAR(255),"
-            "  path VARCHAR(2048),"
+            "  id           BIGSERIAL     PRIMARY KEY,"
+            "  url          VARCHAR(2048) NOT NULL,"
+            "  host         VARCHAR(255),"
+            "  path         VARCHAR(2048),"
             "  query_params TEXT,"
-            "  protocol VARCHAR(16),"
-            "  flow_id BIGINT UNSIGNED,"
-            "  first_seen DATETIME(6) NOT NULL,"
-            "  last_seen  DATETIME(6) NOT NULL,"
-            "  access_count INT UNSIGNED DEFAULT 1,"
-            "  UNIQUE KEY idx_unique_url_flow (url(255), flow_id),"
-            "  KEY idx_url_host (host),"
-            "  KEY idx_url_flow (flow_id),"
-            "  CONSTRAINT fk_urls_flow FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            "  protocol     VARCHAR(16),"
+            "  flow_id      BIGINT REFERENCES flows(id) ON DELETE CASCADE,"
+            "  first_seen   TIMESTAMPTZ   NOT NULL,"
+            "  last_seen    TIMESTAMPTZ   NOT NULL,"
+            "  access_count INTEGER       DEFAULT 1,"
+            "  UNIQUE(url, flow_id)"
+            ")"
         )) return false;
+        exec("CREATE INDEX IF NOT EXISTS idx_url_host ON urls(host)");
+        exec("CREATE INDEX IF NOT EXISTS idx_url_flow ON urls(flow_id)");
 
         if (!exec(
             "CREATE TABLE IF NOT EXISTS applications_summary ("
-            "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
-            "  application VARCHAR(255) NOT NULL,"
-            "  category VARCHAR(255),"
-            "  total_flows BIGINT UNSIGNED DEFAULT 0,"
-            "  total_packets_sent BIGINT UNSIGNED DEFAULT 0,"
-            "  total_packets_recv BIGINT UNSIGNED DEFAULT 0,"
-            "  total_bytes_sent  BIGINT UNSIGNED DEFAULT 0,"
-            "  total_bytes_recv  BIGINT UNSIGNED DEFAULT 0,"
-            "  total_duration_ms DOUBLE DEFAULT 0,"
-            "  first_seen DATETIME(6),"
-            "  last_seen  DATETIME(6),"
-            "  last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
-            "  UNIQUE KEY uk_application (application)"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            "  id                 BIGSERIAL        PRIMARY KEY,"
+            "  application        VARCHAR(255)     NOT NULL UNIQUE,"
+            "  category           VARCHAR(255),"
+            "  total_flows        BIGINT           DEFAULT 0,"
+            "  total_packets_sent BIGINT           DEFAULT 0,"
+            "  total_packets_recv BIGINT           DEFAULT 0,"
+            "  total_bytes_sent   BIGINT           DEFAULT 0,"
+            "  total_bytes_recv   BIGINT           DEFAULT 0,"
+            "  total_duration_ms  DOUBLE PRECISION DEFAULT 0,"
+            "  first_seen         TIMESTAMPTZ,"
+            "  last_seen          TIMESTAMPTZ,"
+            "  last_updated       TIMESTAMPTZ      DEFAULT NOW()"
+            ")"
         )) return false;
 
         if (!exec(
             "CREATE TABLE IF NOT EXISTS hostnames ("
-            "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
-            "  hostname VARCHAR(512) NOT NULL,"
-            "  flow_id BIGINT UNSIGNED,"
-            "  first_seen DATETIME(6),"
-            "  last_seen  DATETIME(6),"
-            "  resolution_count INT UNSIGNED DEFAULT 1,"
-            "  KEY idx_hostname (hostname(255)),"
-            "  KEY idx_hostname_flow (flow_id),"
-            "  CONSTRAINT fk_hostnames_flow FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            "  id               BIGSERIAL    PRIMARY KEY,"
+            "  hostname         VARCHAR(512) NOT NULL,"
+            "  flow_id          BIGINT REFERENCES flows(id) ON DELETE CASCADE,"
+            "  first_seen       TIMESTAMPTZ,"
+            "  last_seen        TIMESTAMPTZ,"
+            "  resolution_count INTEGER DEFAULT 1"
+            ")"
         )) return false;
+        exec("CREATE INDEX IF NOT EXISTS idx_hostname      ON hostnames(hostname)");
+        exec("CREATE INDEX IF NOT EXISTS idx_hostname_flow ON hostnames(flow_id)");
 
         if (!exec(
             "CREATE TABLE IF NOT EXISTS application_mappings ("
-            "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
-            "  pattern_type ENUM('hostname_exact','hostname_suffix','ip_exact','ip_cidr') NOT NULL,"
-            "  pattern VARCHAR(255) NOT NULL,"
-            "  application VARCHAR(255) NOT NULL,"
-            "  category VARCHAR(64),"
-            "  priority INT NOT NULL DEFAULT 100,"
-            "  notes VARCHAR(255),"
-            "  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
-            "  UNIQUE KEY uk_pattern (pattern_type, pattern),"
-            "  KEY idx_app (application)"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            "  id           BIGSERIAL    PRIMARY KEY,"
+            "  pattern_type TEXT         NOT NULL CHECK (pattern_type IN "
+            "    ('hostname_exact','hostname_suffix','ip_exact','ip_cidr')),"
+            "  pattern      VARCHAR(255) NOT NULL,"
+            "  application  VARCHAR(255) NOT NULL,"
+            "  category     VARCHAR(64),"
+            "  priority     INTEGER      NOT NULL DEFAULT 100,"
+            "  notes        VARCHAR(255),"
+            "  created_at   TIMESTAMPTZ  DEFAULT NOW(),"
+            "  UNIQUE(pattern_type, pattern)"
+            ")"
         )) return false;
+        exec("CREATE INDEX IF NOT EXISTS idx_app_mapping_app ON application_mappings(application)");
 
         if (!exec(
             "CREATE TABLE IF NOT EXISTS ipdr_keys ("
-            "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
-            "  key_string VARCHAR(512) NOT NULL,"
-            "  src_ip VARCHAR(45) NOT NULL,"
-            "  dst_ip VARCHAR(45) NOT NULL,"
-            "  dst_port INT UNSIGNED NOT NULL,"
-            "  application VARCHAR(255) DEFAULT '',"
-            "  packets_sent BIGINT UNSIGNED DEFAULT 0,"
-            "  bytes_sent BIGINT UNSIGNED DEFAULT 0,"
-            "  packets_recv BIGINT UNSIGNED DEFAULT 0,"
-            "  bytes_recv BIGINT UNSIGNED DEFAULT 0,"
-            "  first_seen DATETIME(6) NOT NULL,"
-            "  last_seen DATETIME(6) NOT NULL,"
-            "  status ENUM('active','closed') DEFAULT 'active',"
-            "  KEY idx_lookup (src_ip, dst_ip, dst_port, application(64), status),"
-            "  KEY idx_status (status),"
-            "  KEY idx_last_seen (last_seen)"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            "  id           BIGSERIAL    PRIMARY KEY,"
+            "  key_string   VARCHAR(512) NOT NULL UNIQUE,"
+            "  src_ip       VARCHAR(45)  NOT NULL,"
+            "  dst_ip       VARCHAR(45)  NOT NULL,"
+            "  dst_port     INTEGER      NOT NULL,"
+            "  application  VARCHAR(255) DEFAULT '',"
+            "  packets_sent BIGINT       DEFAULT 0,"
+            "  bytes_sent   BIGINT       DEFAULT 0,"
+            "  packets_recv BIGINT       DEFAULT 0,"
+            "  bytes_recv   BIGINT       DEFAULT 0,"
+            "  first_seen   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),"
+            "  last_seen    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),"
+            "  status       TEXT         DEFAULT 'active'"
+            "               CHECK (status IN ('active','closed'))"
+            ")"
         )) return false;
+        exec("CREATE INDEX IF NOT EXISTS idx_ipdr_lookup   ON ipdr_keys(src_ip, dst_ip, dst_port, application, status)");
+        exec("CREATE INDEX IF NOT EXISTS idx_ipdr_status   ON ipdr_keys(status)");
+        exec("CREATE INDEX IF NOT EXISTS idx_ipdr_lastseen ON ipdr_keys(last_seen)");
+        exec("CREATE INDEX IF NOT EXISTS idx_ipdr_src      ON ipdr_keys(src_ip)");
 
         if (!exec(
             "CREATE TABLE IF NOT EXISTS protocol_metadata ("
-            "  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,"
-            "  flow_id BIGINT UNSIGNED NOT NULL,"
-            "  tls_version VARCHAR(20),"
-            "  sni VARCHAR(512),"
-            "  ja3_client VARCHAR(64),"
-            "  ja3_server VARCHAR(64),"
-            "  tls_alpn VARCHAR(256),"
-            "  issuer_dn VARCHAR(512),"
-            "  subject_dn VARCHAR(512),"
-            "  cert_not_after INT UNSIGNED,"
-            "  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
-            "  KEY idx_flow (flow_id),"
-            "  CONSTRAINT fk_pm_flow FOREIGN KEY (flow_id) REFERENCES flows(id) ON DELETE CASCADE"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            "  id             BIGSERIAL   PRIMARY KEY,"
+            "  flow_id        BIGINT      NOT NULL REFERENCES flows(id) ON DELETE CASCADE,"
+            "  tls_version    VARCHAR(20),"
+            "  sni            VARCHAR(512),"
+            "  ja3_client     VARCHAR(64),"
+            "  ja3_server     VARCHAR(64),"
+            "  tls_alpn       VARCHAR(256),"
+            "  issuer_dn      VARCHAR(512),"
+            "  subject_dn     VARCHAR(512),"
+            "  cert_not_after INTEGER,"
+            "  created_at     TIMESTAMPTZ DEFAULT NOW()"
+            ")"
         )) return false;
+        exec("CREATE INDEX IF NOT EXISTS idx_proto_meta_flow ON protocol_metadata(flow_id)");
 
-        // Idempotent migrations — errors are ignored (column/key already exists).
-        exec("ALTER TABLE flows ADD COLUMN ipdr_key_id BIGINT UNSIGNED AFTER metadata");
-        exec("ALTER TABLE flows ADD KEY idx_flow_ipdr (ipdr_key_id)");
-        exec("ALTER TABLE flows DROP COLUMN application_category");
-        exec("ALTER TABLE application_mappings MODIFY COLUMN pattern_type "
-             "ENUM('hostname_exact','hostname_suffix','ip_exact','ip_cidr') NOT NULL");
         exec(
             "CREATE TABLE IF NOT EXISTS capture_policy ("
             "  application VARCHAR(255) NOT NULL PRIMARY KEY,"
-            "  enabled     TINYINT(1)   NOT NULL DEFAULT 1"
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            "  enabled     BOOLEAN      NOT NULL DEFAULT TRUE"
+            ")"
         );
         return true;
     }
@@ -1415,64 +1367,55 @@ private:
 public:
     bool seed_app_mappings() {
         if (kSeedMappingsCount == 0) return true;
-        // Single big INSERT IGNORE — keeps startup fast and is harmless to
-        // re-run on every launch.
         std::ostringstream q;
-        q << "INSERT IGNORE INTO application_mappings "
+        q << "INSERT INTO application_mappings "
           << "(pattern_type, pattern, application, category) VALUES ";
         for (size_t i = 0; i < kSeedMappingsCount; ++i) {
             const SeedRow& r = kSeedMappings[i];
             if (i) q << ',';
-            q << "('" << escape(r.type) << "',"
-              << "'"  << escape(r.pattern) << "',"
-              << "'"  << escape(r.app) << "',"
+            q << "('" << escape(r.type)     << "',"
+              << "'"  << escape(r.pattern)  << "',"
+              << "'"  << escape(r.app)      << "',"
               << "'"  << escape(r.category) << "')";
         }
+        q << " ON CONFLICT (pattern_type, pattern) DO NOTHING";
         return exec(q.str().c_str());
     }
 
     bool load_app_mappings(AppMappings& out) {
         const char* sql =
             "SELECT pattern_type, pattern, application, "
-            "       IFNULL(category, '') "
+            "       COALESCE(category, '') "
             "FROM application_mappings "
             "ORDER BY priority DESC, "
-            // For ip_cidr, sort by numeric prefix length so /32 loads before
-            // /16 before /8 — the linear scan then finds most-specific first.
-            // CHAR_LENGTH works well for hostname suffixes (longer = more specific).
+            // split_part(pattern,'/',2) extracts '24' from '192.168.0.0/24'
             "CASE WHEN pattern_type = 'ip_cidr' "
-            "     THEN CAST(SUBSTRING_INDEX(pattern,'/',-1) AS UNSIGNED) "
-            "     ELSE CHAR_LENGTH(pattern) END DESC";
-        if (mysql_query(conn_, sql) != 0) {
-            std::fprintf(stderr, "load_app_mappings query failed: %s\n",
-                         mysql_error(conn_));
+            "     THEN split_part(pattern,'/',2)::integer "
+            "     ELSE LENGTH(pattern) END DESC";
+
+        PGresult* res = PQexec(conn_, sql);
+        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+            std::fprintf(stderr, "load_app_mappings failed: %s\n", PQerrorMessage(conn_));
+            PQclear(res);
             return false;
         }
-        MYSQL_RES* res = mysql_store_result(conn_);
-        if (!res) {
-            std::fprintf(stderr, "load_app_mappings store_result failed: %s\n",
-                         mysql_error(conn_));
-            return false;
-        }
-        MYSQL_ROW row;
-        while ((row = mysql_fetch_row(res))) {
-            unsigned long* lens = mysql_fetch_lengths(res);
-            std::string type(row[0] ? row[0] : "", row[0] ? lens[0] : 0);
-            std::string pat (row[1] ? row[1] : "", row[1] ? lens[1] : 0);
-            std::string app (row[2] ? row[2] : "", row[2] ? lens[2] : 0);
-            std::string cat (row[3] ? row[3] : "", row[3] ? lens[3] : 0);
+        const int nrows = PQntuples(res);
+        for (int i = 0; i < nrows; ++i) {
+            const char* t = PQgetvalue(res, i, 0); std::string type(t ? t : "");
+            const char* p = PQgetvalue(res, i, 1); std::string pat (p ? p : "");
+            const char* a = PQgetvalue(res, i, 2); std::string app (a ? a : "");
+            const char* c = PQgetvalue(res, i, 3); std::string cat (c ? c : "");
             if (type == "hostname_exact")       out.add_exact_host(pat, app, cat);
             else if (type == "hostname_suffix") out.add_suffix    (pat, app, cat);
             else if (type == "ip_exact")        out.add_ip        (pat, app, cat);
             else if (type == "ip_cidr")         out.add_cidr      (pat, app, cat);
         }
-        mysql_free_result(res);
+        PQclear(res);
         out.finalize();
         return true;
     }
 
 private:
-
     static void parse_url(const std::string& url,
                           std::string& proto, std::string& host,
                           std::string& path, std::string& query) {
@@ -2475,15 +2418,11 @@ static void usage(const char* prog) {
         "  --bpf-filter <expr>        optional BPF filter for live capture\n"
         "  --socket <path>            listen path for pcap_processor (default %s)\n"
         "  --config <path>            optional JSON config\n"
-        "  --mysql-host <host>        MySQL host (default 127.0.0.1)\n"
-        "  --mysql-port <port>        MySQL port (default 3306)\n"
-        "  --mysql-user <user>        MySQL user (default root)\n"
-        "  --mysql-pass <pass>        MySQL password (default empty)\n"
-        "  --mysql-db <name>          MySQL database (default flowmon, auto-created)\n"
-        "  --mysql-socket <path>      MySQL unix socket (overrides host/port)\n"
+        "  --pg-dsn <dsn>             PostgreSQL connection string\n"
+        "                             e.g. postgresql://user:pass@host:5432/dbname?sslmode=require\n"
         "  --flow-timeout <seconds>   inactive flow expiry (default 60)\n"
-        "  --sync-interval <seconds>  active-flow UPSERT cadence (default 30, 0=off)\n"
-        "  --ndpi-max-packets <n>     packets to feed nDPI (default 16)\n"
+        "  --sync-interval <seconds>  active-flow UPSERT cadence (default 5, 0=off)\n"
+        "  --ndpi-max-packets <n>     packets to feed nDPI (default 64)\n"
         "  --max-flows <n>            cap on active flows (default 100000)\n"
         "  --rfmon                    enable 802.11 monitor mode on the interface.\n"
         "                             Captures all frames on the channel (other clients\n"
@@ -2495,12 +2434,7 @@ static void usage(const char* prog) {
 }
 
 enum {
-    OPT_MYSQL_HOST = 1000,
-    OPT_MYSQL_PORT,
-    OPT_MYSQL_USER,
-    OPT_MYSQL_PASS,
-    OPT_MYSQL_DB,
-    OPT_MYSQL_SOCKET,
+    OPT_PG_DSN = 1000,
     OPT_BPF_FILTER,
     OPT_SYNC_INTERVAL,
     OPT_RFMON,
@@ -2515,12 +2449,7 @@ int main(int argc, char** argv) {
         {"bpf-filter",        required_argument, nullptr, OPT_BPF_FILTER},
         {"socket",            required_argument, nullptr, 's'},
         {"config",            required_argument, nullptr, 'c'},
-        {"mysql-host",        required_argument, nullptr, OPT_MYSQL_HOST},
-        {"mysql-port",        required_argument, nullptr, OPT_MYSQL_PORT},
-        {"mysql-user",        required_argument, nullptr, OPT_MYSQL_USER},
-        {"mysql-pass",        required_argument, nullptr, OPT_MYSQL_PASS},
-        {"mysql-db",          required_argument, nullptr, OPT_MYSQL_DB},
-        {"mysql-socket",      required_argument, nullptr, OPT_MYSQL_SOCKET},
+        {"pg-dsn",            required_argument, nullptr, OPT_PG_DSN},
         {"flow-timeout",      required_argument, nullptr, 't'},
         {"sync-interval",     required_argument, nullptr, OPT_SYNC_INTERVAL},
         {"ndpi-max-packets",  required_argument, nullptr, 'n'},
@@ -2534,20 +2463,15 @@ int main(int argc, char** argv) {
     while ((c = getopt_long(argc, argv, "i:s:c:t:n:m:vh", opts, nullptr)) != -1) {
         switch (c) {
             case 'i': cfg.interface = optarg; break;
-            case OPT_BPF_FILTER:   cfg.bpf_filter = optarg; break;
+            case OPT_BPF_FILTER:    cfg.bpf_filter = optarg; break;
             case 's': cfg.socket_path = optarg; break;
             case 'c': config_path = optarg; break;
-            case OPT_MYSQL_HOST:   cfg.mysql_host = optarg; break;
-            case OPT_MYSQL_PORT:   cfg.mysql_port = std::atoi(optarg); break;
-            case OPT_MYSQL_USER:   cfg.mysql_user = optarg; break;
-            case OPT_MYSQL_PASS:   cfg.mysql_pass = optarg; break;
-            case OPT_MYSQL_DB:     cfg.mysql_db   = optarg; break;
-            case OPT_MYSQL_SOCKET: cfg.mysql_socket = optarg; break;
+            case OPT_PG_DSN:        cfg.pg_dsn = optarg; break;
             case 't': cfg.flow_timeout_seconds = std::atoi(optarg); break;
             case OPT_SYNC_INTERVAL: cfg.sync_interval_seconds = std::atoi(optarg); break;
             case 'n': cfg.ndpi_max_packets = std::atoi(optarg); break;
             case 'm': cfg.max_active_flows = static_cast<size_t>(std::atoi(optarg)); break;
-            case OPT_RFMON:        cfg.rfmon   = true;  break;
+            case OPT_RFMON:         cfg.rfmon   = true;  break;
             case 'v': cfg.verbose = true; break;
             case 'h': usage(argv[0]); return 0;
             default:  usage(argv[0]); return 1;
@@ -2590,12 +2514,9 @@ int main(int argc, char** argv) {
     // listener is bypassed entirely.
     if (!cfg.interface.empty()) {
         if (cfg.verbose) {
-            const char* via = cfg.mysql_socket.empty() ? "tcp" : "socket";
             std::fprintf(stderr,
-                "[flow_monitor] ready: live=%s mysql=%s@%s:%d/%s (%s) timeout=%ds sync=%ds\n",
-                cfg.interface.c_str(),
-                cfg.mysql_user.c_str(), cfg.mysql_host.c_str(),
-                cfg.mysql_port, cfg.mysql_db.c_str(), via,
+                "[flow_monitor] ready: live=%s pg_dsn=%s timeout=%ds sync=%ds\n",
+                cfg.interface.c_str(), cfg.pg_dsn.c_str(),
                 cfg.flow_timeout_seconds, cfg.sync_interval_seconds);
         }
         int rc = run_live_capture(cfg, tracker, db);
@@ -2615,12 +2536,9 @@ int main(int argc, char** argv) {
     }
 
     if (cfg.verbose) {
-        const char* via = cfg.mysql_socket.empty() ? "tcp" : "socket";
         std::fprintf(stderr,
-            "[flow_monitor] ready: socket=%s mysql=%s@%s:%d/%s (%s) timeout=%ds sync=%ds\n",
-            cfg.socket_path.c_str(),
-            cfg.mysql_user.c_str(), cfg.mysql_host.c_str(),
-            cfg.mysql_port, cfg.mysql_db.c_str(), via,
+            "[flow_monitor] ready: socket=%s pg_dsn=%s timeout=%ds sync=%ds\n",
+            cfg.socket_path.c_str(), cfg.pg_dsn.c_str(),
             cfg.flow_timeout_seconds, cfg.sync_interval_seconds);
     }
 

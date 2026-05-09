@@ -1,185 +1,293 @@
-const mysql = require('mysql2/promise');
+const { Pool } = require('pg');
+const { createClient } = require('@supabase/supabase-js');
 const logger = require('./logger');
 
 let pool;
+let poolPromise;
+let supabaseClient;
 
-async function getPool() {
-  if (!pool) {
-    pool = mysql.createPool({
-      host: process.env.DB_HOST || '127.0.0.1',
-      port: parseInt(process.env.DB_PORT || '3306'),
-      user: process.env.DB_USER || 'root',
-      password: process.env.DB_PASS || '',
-      database: process.env.DB_NAME || 'flowmon',
-      waitForConnections: true,
-      connectionLimit: 20,
-      queueLimit: 0,
-      enableKeepAlive: true,
-      keepAliveInitialDelay: 10000,
-      timezone: 'local',
-    });
-    await ensureSchema(pool);
+function getSupabaseClient() {
+  if (!supabaseClient) {
+    supabaseClient = createClient(
+      process.env.SUPABASE_URL || '',
+      process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY || ''
+    );
   }
-  return pool;
+  return supabaseClient;
 }
 
-async function ensureSchema(pool) {
-  const conn = await pool.getConnection();
+async function getPool() {
+  if (!poolPromise) {
+    poolPromise = (async () => {
+      const dbUrl = process.env.DATABASE_URL;
+      if (!dbUrl) throw new Error('DATABASE_URL environment variable is required');
+      pool = new Pool({
+        connectionString: dbUrl,
+        max: 20,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 10000,
+        ssl: (dbUrl.includes('supabase') || dbUrl.includes('neon.tech')) ? { rejectUnauthorized: false } : false,
+      });
+      await ensureSchema();
+      return pool;
+    })();
+  }
+  return poolPromise;
+}
+
+async function ensureSchema() {
+  const client = await pool.connect();
   try {
-    await conn.query(`
+    // Trigger function for updated_at columns
+    await client.query(`
+      CREATE OR REPLACE FUNCTION update_updated_at_column()
+      RETURNS TRIGGER LANGUAGE plpgsql AS $$
+      BEGIN NEW.updated_at = NOW(); RETURN NEW; END; $$
+    `);
+
+    // ── flows (primary table written by C++ flow_monitor) ──────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS flows (
+        id             BIGSERIAL PRIMARY KEY,
+        flow_hash      CHAR(32)          NOT NULL,
+        src_ip         VARCHAR(45)       NOT NULL,
+        dst_ip         VARCHAR(45)       NOT NULL,
+        src_port       INTEGER           NOT NULL,
+        dst_port       INTEGER           NOT NULL,
+        protocol       SMALLINT          NOT NULL,
+        application    VARCHAR(255),
+        start_time     TIMESTAMPTZ       NOT NULL,
+        end_time       TIMESTAMPTZ,
+        flow_duration_ms DOUBLE PRECISION,
+        packet_sent    BIGINT            DEFAULT 0,
+        packet_recv    BIGINT            DEFAULT 0,
+        bytes_sent     BIGINT            DEFAULT 0,
+        bytes_recv     BIGINT            DEFAULT 0,
+        total_packets  BIGINT GENERATED ALWAYS AS (packet_sent + packet_recv) STORED,
+        total_bytes    BIGINT GENERATED ALWAYS AS (bytes_sent  + bytes_recv)  STORED,
+        urls           TEXT,
+        hostnames      TEXT,
+        metadata       TEXT,
+        ipdr_key_id    BIGINT,
+        created_at     TIMESTAMPTZ       DEFAULT NOW(),
+        updated_at     TIMESTAMPTZ       DEFAULT NOW(),
+        UNIQUE(flow_hash)
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_flow_times  ON flows(start_time, end_time)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_flow_app    ON flows(application)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_flow_ips    ON flows(src_ip, dst_ip)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_flow_ports  ON flows(src_port, dst_port)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_flow_ipdr   ON flows(ipdr_key_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_flow_upd    ON flows(updated_at)`);
+    await client.query(`
+      CREATE OR REPLACE TRIGGER update_flows_updated_at
+        BEFORE UPDATE ON flows
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()
+    `);
+
+    // ── urls ────────────────────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS urls (
+        id           BIGSERIAL PRIMARY KEY,
+        url          VARCHAR(2048)  NOT NULL,
+        host         VARCHAR(255),
+        path         VARCHAR(2048),
+        query_params TEXT,
+        protocol     VARCHAR(16),
+        flow_id      BIGINT REFERENCES flows(id) ON DELETE CASCADE,
+        first_seen   TIMESTAMPTZ    NOT NULL,
+        last_seen    TIMESTAMPTZ    NOT NULL,
+        access_count INTEGER        DEFAULT 1,
+        UNIQUE(url, flow_id)
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_url_host ON urls(host)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_url_flow ON urls(flow_id)`);
+
+    // ── hostnames ───────────────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS hostnames (
+        id               BIGSERIAL PRIMARY KEY,
+        hostname         VARCHAR(512) NOT NULL,
+        flow_id          BIGINT REFERENCES flows(id) ON DELETE CASCADE,
+        first_seen       TIMESTAMPTZ,
+        last_seen        TIMESTAMPTZ,
+        resolution_count INTEGER DEFAULT 1
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_hostname      ON hostnames(hostname)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_hostname_flow ON hostnames(flow_id)`);
+
+    // ── application_mappings ────────────────────────────────────────────────
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS application_mappings (
+        id           BIGSERIAL PRIMARY KEY,
+        pattern_type TEXT        NOT NULL CHECK (pattern_type IN ('hostname_exact','hostname_suffix','ip_exact','ip_cidr')),
+        pattern      VARCHAR(255) NOT NULL,
+        application  VARCHAR(255) NOT NULL,
+        category     VARCHAR(64),
+        priority     INTEGER     NOT NULL DEFAULT 100,
+        notes        VARCHAR(255),
+        created_at   TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(pattern_type, pattern)
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_app_mapping_app ON application_mappings(application)`);
+
+    // ── users ───────────────────────────────────────────────────────────────
+    await client.query(`
       CREATE TABLE IF NOT EXISTS users (
-        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        username VARCHAR(64) NOT NULL UNIQUE,
+        id            SERIAL PRIMARY KEY,
+        username      VARCHAR(64)  NOT NULL UNIQUE,
         password_hash VARCHAR(255) NOT NULL,
-        role ENUM('admin','viewer') NOT NULL DEFAULT 'viewer',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_login TIMESTAMP NULL
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        role          TEXT         NOT NULL DEFAULT 'viewer'
+                        CHECK (role IN ('admin','operator','viewer')),
+        created_at    TIMESTAMPTZ  DEFAULT NOW(),
+        last_login    TIMESTAMPTZ
+      )
     `);
 
-    await conn.query(`
+    // ── alert_rules ─────────────────────────────────────────────────────────
+    await client.query(`
       CREATE TABLE IF NOT EXISTS alert_rules (
-        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(128) NOT NULL,
-        metric ENUM('bytes_per_sec','flows_per_min','conn_per_ip','unusual_port') NOT NULL,
-        threshold DOUBLE NOT NULL,
-        window_seconds INT UNSIGNED DEFAULT 60,
-        application VARCHAR(255),
-        src_ip VARCHAR(45),
-        dst_ip VARCHAR(45),
-        protocol SMALLINT UNSIGNED,
-        enabled TINYINT(1) DEFAULT 1,
-        created_by INT UNSIGNED,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        KEY idx_enabled (enabled)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        id             SERIAL PRIMARY KEY,
+        name           VARCHAR(128)     NOT NULL,
+        metric         TEXT             NOT NULL
+                         CHECK (metric IN ('bytes_per_sec','flows_per_min','conn_per_ip','unusual_port')),
+        threshold      DOUBLE PRECISION NOT NULL,
+        window_seconds INTEGER          DEFAULT 60,
+        application    VARCHAR(255),
+        src_ip         VARCHAR(45),
+        dst_ip         VARCHAR(45),
+        protocol       SMALLINT,
+        enabled        BOOLEAN          DEFAULT TRUE,
+        created_by     INTEGER,
+        created_at     TIMESTAMPTZ      DEFAULT NOW()
+      )
     `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled ON alert_rules(enabled)`);
 
-    await conn.query(`
+    // ── alert_events ────────────────────────────────────────────────────────
+    await client.query(`
       CREATE TABLE IF NOT EXISTS alert_events (
-        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        rule_id INT UNSIGNED NOT NULL,
-        triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        metric_value DOUBLE,
-        details TEXT,
-        acknowledged TINYINT(1) DEFAULT 0,
-        KEY idx_rule (rule_id),
-        KEY idx_time (triggered_at)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        id            BIGSERIAL PRIMARY KEY,
+        rule_id       INTEGER          NOT NULL,
+        triggered_at  TIMESTAMPTZ      DEFAULT NOW(),
+        metric_value  DOUBLE PRECISION,
+        details       TEXT,
+        acknowledged  BOOLEAN          DEFAULT FALSE
+      )
     `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_alert_events_rule ON alert_events(rule_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_alert_events_time ON alert_events(triggered_at)`);
 
-    await conn.query(`
+    // ── subscribers ─────────────────────────────────────────────────────────
+    await client.query(`
       CREATE TABLE IF NOT EXISTS subscribers (
-        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        ip_address VARCHAR(45) NOT NULL,
+        id            SERIAL PRIMARY KEY,
+        ip_address    VARCHAR(45)  NOT NULL UNIQUE,
         subscriber_id VARCHAR(128) NOT NULL,
-        name VARCHAR(255),
-        notes TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY uk_ip (ip_address),
-        KEY idx_subscriber_id (subscriber_id)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        name          VARCHAR(255),
+        notes         TEXT,
+        created_at    TIMESTAMPTZ  DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ  DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_subscribers_sid ON subscribers(subscriber_id)`);
+    await client.query(`
+      CREATE OR REPLACE TRIGGER update_subscribers_updated_at
+        BEFORE UPDATE ON subscribers
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()
     `);
 
-    await conn.query(`
+    // ── ipdr_keys ───────────────────────────────────────────────────────────
+    await client.query(`
       CREATE TABLE IF NOT EXISTS ipdr_keys (
-        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        key_string VARCHAR(512) NOT NULL,
-        src_ip VARCHAR(45) NOT NULL,
-        dst_ip VARCHAR(45) NOT NULL,
-        dst_port INT UNSIGNED NOT NULL,
-        application VARCHAR(255) DEFAULT '',
-        packets_sent BIGINT UNSIGNED DEFAULT 0,
-        bytes_sent BIGINT UNSIGNED DEFAULT 0,
-        packets_recv BIGINT UNSIGNED DEFAULT 0,
-        bytes_recv BIGINT UNSIGNED DEFAULT 0,
-        first_seen DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-        last_seen DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-        status ENUM('active','closed') DEFAULT 'active',
-        KEY idx_lookup (src_ip, dst_ip, dst_port, application(64), status),
-        KEY idx_status (status),
-        KEY idx_last_seen (last_seen),
-        KEY idx_src (src_ip)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        id           BIGSERIAL PRIMARY KEY,
+        key_string   VARCHAR(512) NOT NULL UNIQUE,
+        src_ip       VARCHAR(45)  NOT NULL,
+        dst_ip       VARCHAR(45)  NOT NULL,
+        dst_port     INTEGER      NOT NULL,
+        application  VARCHAR(255) DEFAULT '',
+        packets_sent BIGINT       DEFAULT 0,
+        bytes_sent   BIGINT       DEFAULT 0,
+        packets_recv BIGINT       DEFAULT 0,
+        bytes_recv   BIGINT       DEFAULT 0,
+        first_seen   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        last_seen    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+        status       TEXT         DEFAULT 'active' CHECK (status IN ('active','closed'))
+      )
     `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_ipdr_lookup   ON ipdr_keys(src_ip, dst_ip, dst_port, application, status)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_ipdr_status   ON ipdr_keys(status)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_ipdr_lastseen ON ipdr_keys(last_seen)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_ipdr_src      ON ipdr_keys(src_ip)`);
 
-    await conn.query(`
+    // ── protocol_metadata ───────────────────────────────────────────────────
+    await client.query(`
       CREATE TABLE IF NOT EXISTS protocol_metadata (
-        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        flow_id BIGINT UNSIGNED NOT NULL,
-        tls_version VARCHAR(20),
-        sni VARCHAR(512),
-        ja3_client VARCHAR(64),
-        ja3_server VARCHAR(64),
-        tls_alpn VARCHAR(256),
-        issuer_dn VARCHAR(512),
-        subject_dn VARCHAR(512),
-        cert_not_after INT UNSIGNED,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        KEY idx_flow (flow_id)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        id             BIGSERIAL PRIMARY KEY,
+        flow_id        BIGINT      NOT NULL REFERENCES flows(id) ON DELETE CASCADE,
+        tls_version    VARCHAR(20),
+        sni            VARCHAR(512),
+        ja3_client     VARCHAR(64),
+        ja3_server     VARCHAR(64),
+        tls_alpn       VARCHAR(256),
+        issuer_dn      VARCHAR(512),
+        subject_dn     VARCHAR(512),
+        cert_not_after INTEGER,
+        created_at     TIMESTAMPTZ DEFAULT NOW()
+      )
     `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_proto_meta_flow ON protocol_metadata(flow_id)`);
 
-    await conn.query(`
+    // ── applications_summary ────────────────────────────────────────────────
+    await client.query(`
       CREATE TABLE IF NOT EXISTS applications_summary (
-        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-        application VARCHAR(255) NOT NULL,
-        category VARCHAR(255),
-        total_flows BIGINT UNSIGNED DEFAULT 0,
-        total_packets_sent BIGINT UNSIGNED DEFAULT 0,
-        total_packets_recv BIGINT UNSIGNED DEFAULT 0,
-        total_bytes_sent BIGINT UNSIGNED DEFAULT 0,
-        total_bytes_recv BIGINT UNSIGNED DEFAULT 0,
-        total_duration_ms DOUBLE DEFAULT 0,
-        first_seen DATETIME(6),
-        last_seen DATETIME(6),
-        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY uk_application (application)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        id                  BIGSERIAL PRIMARY KEY,
+        application         VARCHAR(255)     NOT NULL UNIQUE,
+        category            VARCHAR(255),
+        total_flows         BIGINT           DEFAULT 0,
+        total_packets_sent  BIGINT           DEFAULT 0,
+        total_packets_recv  BIGINT           DEFAULT 0,
+        total_bytes_sent    BIGINT           DEFAULT 0,
+        total_bytes_recv    BIGINT           DEFAULT 0,
+        total_duration_ms   DOUBLE PRECISION DEFAULT 0,
+        first_seen          TIMESTAMPTZ,
+        last_seen           TIMESTAMPTZ,
+        last_updated        TIMESTAMPTZ      DEFAULT NOW()
+      )
     `);
 
-    await conn.query(`
+    // ── capture_policy ──────────────────────────────────────────────────────
+    await client.query(`
       CREATE TABLE IF NOT EXISTS capture_policy (
         application VARCHAR(255) NOT NULL PRIMARY KEY,
-        enabled TINYINT(1) NOT NULL DEFAULT 1
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        enabled     BOOLEAN      NOT NULL DEFAULT TRUE
+      )
     `);
 
-    // Migration: add ipdr_key_id to flows
-    try { await conn.query('ALTER TABLE flows ADD COLUMN ipdr_key_id BIGINT UNSIGNED AFTER metadata'); } catch {}
-    try { await conn.query('ALTER TABLE flows ADD KEY idx_flow_ipdr (ipdr_key_id)'); } catch {}
-    // Migration: drop application_category (now computed via JOIN)
-    try { await conn.query('ALTER TABLE flows DROP COLUMN application_category'); } catch {}
-    // Migration: extend application_mappings ENUM
-    try {
-      await conn.query("ALTER TABLE application_mappings MODIFY COLUMN pattern_type ENUM('hostname_exact','hostname_suffix','ip_exact','ip_cidr') NOT NULL");
-    } catch {}
-    // Migration: add operator role to users
-    try {
-      await conn.query("ALTER TABLE users MODIFY COLUMN role ENUM('admin','operator','viewer') NOT NULL DEFAULT 'viewer'");
-    } catch {}
-
     // Seed default admin if table is empty
-    const [rows] = await conn.query('SELECT COUNT(*) as c FROM users');
+    const { rows } = await client.query('SELECT COUNT(*)::int AS c FROM users');
     if (rows[0].c === 0) {
       const bcrypt = require('bcryptjs');
       const hash = await bcrypt.hash('admin123', 10);
-      await conn.query(
-        "INSERT INTO users (username, password_hash, role) VALUES ('admin', ?, 'admin')",
-        [hash]
+      await client.query(
+        "INSERT INTO users (username, password_hash, role) VALUES ($1, $2, 'admin')",
+        ['admin', hash]
       );
       logger.info('Seeded default admin user', { username: 'admin' });
     }
   } finally {
-    conn.release();
+    client.release();
   }
 }
 
 async function query(sql, params) {
-  const pool = await getPool();
-  const [rows] = await pool.query(sql, params);
-  return rows;
+  const p = await getPool();
+  const result = await p.query(sql, params);
+  return result.rows;
 }
 
 async function queryOne(sql, params) {
@@ -187,4 +295,4 @@ async function queryOne(sql, params) {
   return rows[0] || null;
 }
 
-module.exports = { getPool, query, queryOne };
+module.exports = { getPool, getSupabaseClient, query, queryOne };

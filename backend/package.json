@@ -24,7 +24,8 @@
     "express-rate-limit": "^7.1.5",
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
-    "mysql2": "^3.6.5",
+    "@supabase/supabase-js": "^2.50.0",
+    "pg": "^8.13.0",
     "posthog-node": "^5.21.2",
     "winston": "^3.19.0",
     "ws": "^8.15.1"
