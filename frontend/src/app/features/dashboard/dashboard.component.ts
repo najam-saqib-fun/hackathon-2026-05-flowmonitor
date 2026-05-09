@@ -16,6 +16,13 @@ import { TimeFilterComponent, TimeFilter } from '../../shared/time-filter/time-f
 
 Chart.register(...registerables);
 
+function fmtDuration(ms: number): string {
+  if (!ms) return '—';
+  if (ms < 1000) return ms.toFixed(0) + ' ms';
+  if (ms < 60000) return (ms / 1000).toFixed(1) + ' s';
+  return (ms / 60000).toFixed(1) + ' min';
+}
+
 function fmtBytes(b: number): string {
   if (typeof b !== 'number') b = Number(b);
   if (!b) return '0 B';
@@ -70,8 +77,13 @@ function fmtApp(app: string, hostnames: string | null | undefined): string {
   `],
   template: `
     <div class="dash-header">
-      <div class="page-header" style="margin:0;">
+      <div class="page-header" style="margin:0;display:flex;align-items:center;gap:0.75rem;">
         <span class="live-dot"></span>Real-time Dashboard
+        <span [style.background]="isLive() ? 'rgba(34,197,94,0.15)' : 'rgba(100,116,139,0.2)'"
+              [style.color]="isLive() ? '#22c55e' : '#94a3b8'"
+              style="font-size:0.72rem;font-weight:600;padding:2px 10px;border-radius:99px;letter-spacing:0.05em;">
+          {{ isLive() ? 'LIVE' : 'IDLE' }}
+        </span>
       </div>
       <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
         <mat-slide-toggle [checked]="!ws.paused()" (change)="ws.toggle()" color="accent" style="font-size:0.85rem;">
@@ -216,6 +228,7 @@ export class DashboardComponent implements OnInit, OnDestroy {
   _topApps   = signal<any[]>([]);
   topTalkers = signal<any[]>([]);
   _liveFlows = signal<any[]>([]);
+  isLive     = signal(false);
   flowCols   = ['src', 'dst', 'proto', 'app', 'bytes', 'updated'];
   showUnknown = signal(true);
   activeFilter = signal<TimeFilter>({ start: null, end: null });
@@ -319,6 +332,7 @@ export class DashboardComponent implements OnInit, OnDestroy {
   }
 
   private updateKpis(d: any) {
+    this.isLive.set((d.flows_last_60s || 0) > 0);
     this.kpis.set([
       { label: 'Total Flows',       value: (d.total_flows || 0).toLocaleString() },
       { label: 'Total Bytes',       value: fmtBytes(d.total_bytes || 0) },
@@ -326,6 +340,7 @@ export class DashboardComponent implements OnInit, OnDestroy {
       { label: 'Bytes (60s)',       value: fmtBytes(d.bytes_last_60s || 0),          sub: 'last minute' },
       { label: 'Unique Source IPs', value: (d.unique_src_ips || 0).toLocaleString() },
       { label: 'Applications',      value: (d.unique_apps || 0).toLocaleString() },
+      { label: 'Avg Duration',      value: fmtDuration(d.avg_duration_ms || 0) },
     ]);
   }
 

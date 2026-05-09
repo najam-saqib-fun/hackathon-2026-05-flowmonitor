@@ -1,0 +1,35 @@
+{
+  "timestamp": "2026-05-09T08:45:25.895Z",
+  "issues": [
+    {
+      "severity": "CRITICAL",
+      "page": "Auth",
+      "description": "Admin login failed",
+      "detail": ""
+    },
+    {
+      "severity": "MEDIUM",
+      "page": "Dashboard",
+      "description": "KPI card \"Avg Duration\" not visible",
+      "detail": ""
+    },
+    {
+      "severity": "LOW",
+      "page": "Mappings",
+      "description": "CSV export button not found",
+      "detail": ""
+    },
+    {
+      "severity": "MEDIUM",
+      "page": "Console",
+      "description": "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "detail": "on http://localhost:4200/login"
+    }
+  ],
+  "consoleErrors": [
+    {
+      "url": "http://localhost:4200/login",
+      "text": "Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+    }
+  ]
+}

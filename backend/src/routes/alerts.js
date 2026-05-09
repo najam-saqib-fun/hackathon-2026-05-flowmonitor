@@ -1,6 +1,6 @@
 const express = require('express');
 const { query, queryOne } = require('../db');
-const { requireAuth, requireAdmin } = require('../middleware/auth');
+const { requireAuth, requireAdmin, requireOperator } = require('../middleware/auth');
 const analytics = require('../analytics');
 
 const router = express.Router();
@@ -110,7 +110,7 @@ router.get('/events', requireAuth, async (req, res) => {
 });
 
 // POST /api/alerts/events/:id/acknowledge
-router.post('/events/:id/acknowledge', requireAuth, async (req, res) => {
+router.post('/events/:id/acknowledge', requireOperator, async (req, res) => {
   try {
     await query('UPDATE alert_events SET acknowledged = 1 WHERE id = ?', [req.params.id]);
     analytics.track('alert_acknowledged', req.user.username, { event_id: req.params.id });

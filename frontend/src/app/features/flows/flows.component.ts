@@ -38,16 +38,40 @@ function fmtBytes(b: number): string {
   standalone: true,
   imports: [NgIf, NgFor, MatButtonModule, MatIconModule, MatDialogModule, DatePipe],
   template: `
-    <div style="padding:1.5rem;max-width:95vw;min-width:340px;">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+    <div style="padding:1.5rem;max-width:95vw;min-width:360px;overflow-y:auto;max-height:90vh;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.25rem;">
         <h2 style="margin:0;font-size:1rem;color:#818cf8;">Flow #{{ data?.id }}</h2>
         <button mat-icon-button (click)="close()"><mat-icon>close</mat-icon></button>
       </div>
 
-      <!-- QUIC metadata card -->
+      <!-- Core fields grid -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.6rem 1.5rem;margin-bottom:1rem;">
+        <ng-container *ngFor="let row of coreRows">
+          <div style="color:#64748b;font-size:0.78rem;font-weight:500;">{{ row[0] }}</div>
+          <div style="color:#e2e8f0;font-size:0.82rem;word-break:break-all;font-family:monospace;">{{ row[1] }}</div>
+        </ng-container>
+      </div>
+
+      <!-- Hostnames -->
+      <div *ngIf="hostnames.length" style="margin-bottom:0.75rem;">
+        <div style="font-size:0.75rem;font-weight:600;color:#818cf8;letter-spacing:0.05em;margin-bottom:0.4rem;">HOSTNAMES</div>
+        <div style="display:flex;flex-wrap:wrap;gap:0.35rem;">
+          <span *ngFor="let h of hostnames" style="background:rgba(99,102,241,0.12);color:#a5b4fc;border:1px solid rgba(99,102,241,0.3);border-radius:4px;padding:2px 8px;font-size:0.78rem;font-family:monospace;">{{ h }}</span>
+        </div>
+      </div>
+
+      <!-- URLs -->
+      <div *ngIf="urls.length" style="margin-bottom:0.75rem;">
+        <div style="font-size:0.75rem;font-weight:600;color:#f59e0b;letter-spacing:0.05em;margin-bottom:0.4rem;">URLS</div>
+        <div style="display:flex;flex-direction:column;gap:0.3rem;">
+          <div *ngFor="let u of urls" style="color:#fcd34d;font-size:0.78rem;font-family:monospace;word-break:break-all;background:rgba(245,158,11,0.07);border-radius:4px;padding:2px 8px;">{{ u }}</div>
+        </div>
+      </div>
+
+      <!-- QUIC / TLS metadata card -->
       <div *ngIf="quicMeta" style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:0.75rem 1rem;margin-bottom:1rem;">
         <div style="font-size:0.75rem;font-weight:600;color:#22d3ee;letter-spacing:0.05em;margin-bottom:0.5rem;">
-          QUIC / TLS Metadata
+          QUIC / TLS METADATA
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.25rem 1rem;font-size:0.8rem;">
           <ng-container *ngFor="let kv of quicRows">
@@ -57,7 +81,6 @@ function fmtBytes(b: number): string {
         </div>
       </div>
 
-      <pre style="font-family:monospace;background:#12151e;color:#e2e8f0;padding:1rem;border-radius:8px;overflow:auto;max-height:55vh;font-size:0.78rem;white-space:pre-wrap;word-break:break-all;">{{ json }}</pre>
       <div style="display:flex;justify-content:flex-end;margin-top:1rem;">
         <button mat-flat-button color="primary" (click)="close()">Close</button>
       </div>
@@ -67,6 +90,54 @@ function fmtBytes(b: number): string {
 export class FlowDetailModalComponent {
   data: any;
   private dialog = inject(MatDialog);
+
+  get coreRows(): [string, string][] {
+    if (!this.data) return [];
+    const d = this.data;
+    const proto: Record<number, string> = { 6: 'TCP', 17: 'UDP', 1: 'ICMP' };
+    const dur = (ms: number) => !ms ? '—' : ms < 1000 ? ms.toFixed(0) + ' ms' : (ms / 1000).toFixed(1) + ' s';
+    const bytes = (b: number) => {
+      if (!b) return '0 B';
+      if (b >= 1e9) return (b / 1e9).toFixed(2) + ' GB';
+      if (b >= 1e6) return (b / 1e6).toFixed(2) + ' MB';
+      if (b >= 1e3) return (b / 1e3).toFixed(2) + ' KB';
+      return b + ' B';
+    };
+    const fmtTime = (t: string | null) => t ? new Date(t).toLocaleString() : '—';
+    return [
+      ['Source IP',       `${d.src_ip || '—'}:${d.src_port || '—'}`],
+      ['Destination IP',  `${d.dst_ip || '—'}:${d.dst_port || '—'}`],
+      ['Protocol',        proto[d.protocol] || String(d.protocol || '—')],
+      ['Application',     d.application || '—'],
+      ['Category',        d.application_category || '—'],
+      ['Subscriber',      d.subscriber_id || '—'],
+      ['Bytes Sent',      bytes(d.bytes_sent || 0)],
+      ['Bytes Received',  bytes(d.bytes_recv || 0)],
+      ['Total Bytes',     bytes(d.total_bytes || 0)],
+      ['Total Packets',   (d.total_packets || 0).toLocaleString()],
+      ['Duration',        dur(d.flow_duration_ms)],
+      ['Start Time',      fmtTime(d.start_time)],
+      ['End Time',        fmtTime(d.end_time)],
+    ].filter(r => r[1] !== '—' || ['Category','Subscriber','End Time'].includes(r[0] as string)) as [string, string][];
+  }
+
+  get hostnames(): string[] {
+    if (!this.data?.hostnames_detail) return [];
+    try {
+      const arr = typeof this.data.hostnames_detail === 'string'
+        ? JSON.parse(this.data.hostnames_detail) : this.data.hostnames_detail;
+      return Array.isArray(arr) ? arr.filter(Boolean) : [];
+    } catch { return []; }
+  }
+
+  get urls(): string[] {
+    if (!this.data?.urls_detail) return [];
+    try {
+      const arr = typeof this.data.urls_detail === 'string'
+        ? JSON.parse(this.data.urls_detail) : this.data.urls_detail;
+      return Array.isArray(arr) ? arr.filter(Boolean) : [];
+    } catch { return []; }
+  }
 
   get quicMeta(): Record<string, any> | null {
     if (!this.data?.metadata) return null;
@@ -91,15 +162,6 @@ export class FlowDetailModalComponent {
       tls_cert_not_after: 'Cert Expiry',
     };
     return Object.entries(m).map(([k, v]) => [labels[k] || k, String(v)]);
-  }
-
-  get json() {
-    if (!this.data) return '';
-    const d = { ...this.data };
-    if (d.metadata && typeof d.metadata === 'string') {
-      try { d.metadata = JSON.parse(d.metadata); } catch { /* leave as string */ }
-    }
-    return JSON.stringify(d, null, 2);
   }
 
   close() { this.dialog.closeAll(); }
@@ -212,15 +274,21 @@ export class FlowDetailModalComponent {
           </td>
         </ng-container>
         <ng-container matColumnDef="bytes">
-          <th mat-header-cell *matHeaderCellDef style="color:#64748b;">Total Bytes</th>
+          <th mat-header-cell *matHeaderCellDef style="color:#64748b;cursor:pointer;user-select:none;" (click)="sortBy('total_bytes')">
+            Total Bytes <span style="font-size:0.7rem;opacity:0.7;">{{ sortIcon('total_bytes') }}</span>
+          </th>
           <td mat-cell *matCellDef="let f">{{ fmtB(f.total_bytes) }}</td>
         </ng-container>
         <ng-container matColumnDef="duration">
-          <th mat-header-cell *matHeaderCellDef style="color:#64748b;">Duration</th>
+          <th mat-header-cell *matHeaderCellDef style="color:#64748b;cursor:pointer;user-select:none;" (click)="sortBy('flow_duration_ms')">
+            Duration <span style="font-size:0.7rem;opacity:0.7;">{{ sortIcon('flow_duration_ms') }}</span>
+          </th>
           <td mat-cell *matCellDef="let f">{{ fmtDur(f.flow_duration_ms) }}</td>
         </ng-container>
         <ng-container matColumnDef="start">
-          <th mat-header-cell *matHeaderCellDef style="color:#64748b;">Start</th>
+          <th mat-header-cell *matHeaderCellDef style="color:#64748b;cursor:pointer;user-select:none;" (click)="sortBy('start_time')">
+            Start <span style="font-size:0.7rem;opacity:0.7;">{{ sortIcon('start_time') }}</span>
+          </th>
           <td mat-cell *matCellDef="let f" style="font-size:0.8rem;color:#94a3b8;">{{ f.start_time | date:'MM/dd HH:mm:ss' }}</td>
         </ng-container>
         <tr mat-header-row *matHeaderRowDef="cols"></tr>
@@ -246,8 +314,10 @@ export class FlowsComponent implements OnInit {
   loading  = signal(false);
   pageSize = 50;
   offset   = 0;
-  showUnknown = signal(true);
+  showUnknown  = signal(true);
   activeFilter = signal<TimeFilter>({ start: null, end: null });
+  sortCol  = signal<string>('start_time');
+  sortDir  = signal<'asc'|'desc'>('desc');
   fmtB   = fmtBytes;
   fmtApp = fmtApp;
 
@@ -260,6 +330,22 @@ export class FlowsComponent implements OnInit {
 
   onFilterChange(f: TimeFilter) { this.activeFilter.set(f); this.offset = 0; this.load(); }
   search() { this.offset = 0; this.load(); }
+
+  sortBy(col: string) {
+    if (this.sortCol() === col) {
+      this.sortDir.set(this.sortDir() === 'asc' ? 'desc' : 'asc');
+    } else {
+      this.sortCol.set(col);
+      this.sortDir.set('desc');
+    }
+    this.offset = 0;
+    this.load();
+  }
+
+  sortIcon(col: string): string {
+    if (this.sortCol() !== col) return '↕';
+    return this.sortDir() === 'asc' ? '▲' : '▼';
+  }
 
   reset() {
     this.filters.reset({ src_ip:'', dst_ip:'', application:'', subscriber:'', protocol:'' });
@@ -284,7 +370,7 @@ export class FlowsComponent implements OnInit {
     this.loading.set(true);
     const f = this.filters.getRawValue();
     const tf = this.activeFilter();
-    const params: Record<string, any> = { limit: this.pageSize, offset: this.offset, sort: 'start_time', order: 'desc' };
+    const params: Record<string, any> = { limit: this.pageSize, offset: this.offset, sort: this.sortCol(), order: this.sortDir() };
     if (f.src_ip)      params['src_ip']      = f.src_ip;
     if (f.dst_ip)      params['dst_ip']      = f.dst_ip;
     if (f.application) params['application'] = f.application;

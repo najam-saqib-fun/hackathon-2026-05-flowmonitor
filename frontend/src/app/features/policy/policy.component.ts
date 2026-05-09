@@ -95,13 +95,13 @@ interface PolicyRow {
     <div class="toolbar-row">
       <mat-form-field appearance="outline" style="width:240px;flex-shrink:0;">
         <mat-label>Search</mat-label>
-        <input matInput [(ngModel)]="searchText" placeholder="Filter by name…">
+        <input matInput [ngModel]="searchText()" (ngModelChange)="searchText.set($event)" placeholder="Filter by name…">
         <mat-icon matSuffix style="color:#64748b;">search</mat-icon>
       </mat-form-field>
 
       <mat-form-field appearance="outline" style="width:170px;flex-shrink:0;">
         <mat-label>Category</mat-label>
-        <mat-select [(ngModel)]="filterCategory">
+        <mat-select [ngModel]="filterCategory()" (ngModelChange)="filterCategory.set($event)">
           <mat-option value="">All</mat-option>
           <mat-option *ngFor="let c of categories()" [value]="c">{{ c }}</mat-option>
         </mat-select>
@@ -268,8 +268,8 @@ export class PolicyComponent implements OnInit {
   saving  = signal(false);
   adding  = signal<'allow' | 'block' | null>(null);
 
-  searchText     = '';
-  filterCategory = '';
+  searchText     = signal('');
+  filterCategory = signal('');
 
   // Autocomplete
   appCtrl     = new FormControl('');
@@ -280,8 +280,8 @@ export class PolicyComponent implements OnInit {
   );
 
   filteredRows = computed(() => {
-    const s   = this.searchText.trim().toLowerCase();
-    const cat = this.filterCategory;
+    const s   = this.searchText().trim().toLowerCase();
+    const cat = this.filterCategory();
     return this.rows().filter(r =>
       (!s   || r.application.toLowerCase().includes(s)) &&
       (!cat || r.category === cat)

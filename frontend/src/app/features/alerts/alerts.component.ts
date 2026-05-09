@@ -148,9 +148,10 @@ import { AuthService } from '../../core/services/auth.service';
                 <th mat-header-cell *matHeaderCellDef style="color:#64748b;">Status</th>
                 <td mat-cell *matCellDef="let e">
                   <span *ngIf="e.acknowledged" class="badge badge-success">ACK</span>
-                  <button *ngIf="!e.acknowledged" mat-stroked-button color="accent" style="font-size:0.75rem;height:28px;line-height:28px;" (click)="ack(e)">
+                  <button *ngIf="!e.acknowledged && isOperator" mat-stroked-button color="accent" style="font-size:0.75rem;height:28px;line-height:28px;" (click)="ack(e)">
                     Acknowledge
                   </button>
+                  <span *ngIf="!e.acknowledged && !isOperator" style="color:#64748b;font-size:0.8rem;">Pending</span>
                 </td>
               </ng-container>
               <tr mat-header-row *matHeaderRowDef="eventCols"></tr>
@@ -171,7 +172,8 @@ export class AlertsComponent implements OnInit, OnDestroy {
   private auth    = inject(AuthService);
   private alertSub?: Subscription;
 
-  isAdmin   = false;
+  isAdmin    = false;
+  isOperator = false;
   rules  = signal<any[]>([]);
   events = signal<any[]>([]);
   ruleCols  = ['name', 'metric', 'threshold', 'window', 'app', 'enabled', 'actions'];
@@ -187,7 +189,9 @@ export class AlertsComponent implements OnInit, OnDestroy {
   });
 
   ngOnInit() {
-    this.isAdmin = this.auth.currentUser?.role === 'admin';
+    const role = this.auth.currentUser?.role;
+    this.isAdmin    = role === 'admin';
+    this.isOperator = role === 'admin' || role === 'operator';
     this.loadRules();
     this.loadEvents(false);
     this.alertSub = this.ws.alert$.subscribe(alert => {
