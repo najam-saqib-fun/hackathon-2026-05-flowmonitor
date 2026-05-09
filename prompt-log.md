@@ -79,6 +79,21 @@
 
 ---
 
+### 6. Full-stack DB migration with explicit constraints
+
+**Context:** Needed to migrate the entire project from MySQL (Railway) to PostgreSQL (Supabase/Neon) across C++, Node.js, and deploy on Vercel — a multi-file, multi-layer change.
+
+**Prompt:**
+> "I have now switched my project branch from Railway (MySQL) to Supabase (PostgreSQL). I need a complete migration of all database logic, followed by full-stack deployment on Vercel and end-to-end verification. Tasks: (1) Migrate all backend JS route files from mysql2 `?` params to pg `$N` params, DATE_FORMAT→to_char, INTERVAL ? SECOND→INTERVAL '? seconds', etc. (2) Rewrite FlowDB class in flow_monitor.cpp from libmysqlclient to libpq. (3) Update CMakeLists.txt to detect libpq. (4) Deploy backend to Vercel with Neon DATABASE_URL env var. (5) Smoke-test: login, /api/health, /api/stats/overview."
+
+**Why it worked:** Enumerated all five subtasks with the exact technical changes expected (param style, date function names, library names). This let Claude work through each file systematically without re-reading the whole task. Naming the expected output format (`$N` vs `?`) prevented Claude from guessing.
+
+**Output quality:** 5/5
+**Model used:** Sonnet
+**Approx tokens / cost:** ~210,000 / ~$2.20 (across two sessions)
+
+---
+
 ## Bottom 3 Prompts That Wasted Time
 
 ---
@@ -105,7 +120,18 @@
 
 ---
 
-### 3. Pasting requirements verbatim
+### 4. Credential with a typo inside a URI
+
+**What I asked:**
+> "connection string is direct: postgresql://postgres:flowmon1234)@db.rahdbxjhkllyikcsukxv.supabase.co:5432/postgres"
+
+**What went wrong:** Password contained a stray `)` that was invisible in context. Claude URL-encoded it as `%29` and constructed valid-looking but failing connection strings. Debugging took two full rounds before the user confirmed the correct password was `flowmon1324` (not `flowmon1234)`).
+
+**What I should have done:** Paste credentials in a code block with the password on its own line, then explicitly confirm: "password is `flowmon1324` — no trailing characters". Saves one full round of connection debugging.
+
+---
+
+### 5. Pasting requirements verbatim
 
 **What I asked:**
 > "Required .md Files (Must commit to your repo) — [copy-paste of hackathon requirements doc]"
