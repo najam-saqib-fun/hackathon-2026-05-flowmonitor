@@ -1,37 +1,46 @@
-# Cost Log — FlowMon Development
+# Cost Log — najam-ul-saqib — FlowMon
 
-## Summary
-
-| Session | Date | Task | Tokens (approx) | Cost (approx) |
-|---------|------|------|-----------------|---------------|
-| 1 | 2026-05-07 | Bug fixes + full Q/A (Top Talkers, Bandwidth, Categories, Policy) | ~180 000 | ~$0.54 |
-| 2 | 2026-05-07 | specs.md creation (13-section full technical spec) | ~40 000 | ~$0.12 |
-| 3 | 2026-05-07 | Frontend responsiveness + 15 s refresh interval | ~35 000 | ~$0.11 |
-| 4 | 2026-05-07 | TS1206 decorator build error fix | ~12 000 | ~$0.04 |
-| 5 | 2026-05-07 | Bandwidth chart decoupling (own setInterval) | ~18 000 | ~$0.05 |
-| 6 | 2026-05-07 | Data consistency fix (WS/REST scope mismatch) | ~55 000 | ~$0.17 |
-| 7 | 2026-05-07 | Required .md files (SPEC, prompt-log, skills) | ~30 000 | ~$0.09 |
-| 8 | 2026-05-07 | Cost log, standup, demo script, scorecard, reflection | ~20 000 | ~$0.06 |
-| **Total** | | | **~390 000** | **~$1.18** |
-
-> Token estimates based on claude-sonnet-4-6 pricing ($3/$15 per M input/output).
-> Actual billed usage visible in Anthropic Console → Usage.
+All sessions started **2026-05-07**. Token counts are estimates.
+Prices: Sonnet 4.x input ~$3/M, output ~$15/M tokens.
 
 ---
 
-## Cost Observations
+## Session Breakdown
 
-| Observation | Impact |
-|-------------|--------|
-| Bundling multiple bugs in one prompt (Session 1) reduced round-trips | Saved ~2–3 sessions worth of overhead |
-| Providing concrete before/after numbers (Session 6) resolved root cause in one pass | Avoided 2–3 follow-up clarification turns |
-| `create specs.md` after rich context needed no re-exploration | Minimal input tokens; full output |
-| Short follow-up prompts after partial fixes are cheapest path to correctness | Each follow-up < 20 k tokens |
+| # | Date | Description | Input tokens | Output tokens | Est. cost |
+|---|------|-------------|-------------|--------------|-----------|
+| 1 | 2026-05-07 | Bug fixes + full Q/A (Top Talkers, Bandwidth, Categories, Policy) | ~130,000 | ~50,000 | ~$1.14 |
+| 2 | 2026-05-07 | specs.md creation (13-section full technical spec) | ~30,000 | ~10,000 | ~$0.24 |
+| 3 | 2026-05-07 | Frontend responsiveness + 15 s refresh interval | ~25,000 | ~10,000 | ~$0.23 |
+| 4 | 2026-05-07 | TS1206 decorator build error fix | ~8,000 | ~4,000 | ~$0.08 |
+| 5 | 2026-05-07 | Bandwidth chart decoupling (own setInterval) | ~12,000 | ~6,000 | ~$0.13 |
+| 6 | 2026-05-07 | Data consistency fix (WS/REST scope mismatch) | ~40,000 | ~15,000 | ~$0.34 |
+| 7 | 2026-05-07 | Required .md files (SPEC, prompt-log, skills) | ~20,000 | ~10,000 | ~$0.21 |
+| 8 | 2026-05-07 | Cost log, standup, demo script, scorecard, reflection | ~15,000 | ~5,000 | ~$0.12 |
+| 9 | 2026-05-08 | Railway MySQL deployment: Vercel backend + frontend redeploy | ~30,000 | ~10,000 | ~$0.24 |
+| 10 | 2026-05-08 | Full MySQL → PostgreSQL migration: all 9 route files, db.js, websocket.js | ~90,000 | ~45,000 | ~$0.95 |
+| 11 | 2026-05-08 | C++ FlowDB libpq rewrite, CMakeLists.txt, --pg-dsn CLI flag | ~60,000 | ~30,000 | ~$0.63 |
+| 12 | 2026-05-08 | Supabase → Neon migration: IPv6 debugging, non-blocking startup fix | ~70,000 | ~30,000 | ~$0.66 |
+| 13 | 2026-05-09 | Notion updates, cost-log, prompt-log, screenshots via Playwright | ~20,000 | ~10,000 | ~$0.21 |
+| 14 | 2026-05-09 | User management: viewer role restrictions on all write-action pages | ~25,000 | ~12,000 | ~$0.26 |
 
 ---
 
-## Running Total
+## Totals
 
-**Estimated total spend to date: ~$1.18**
+| Metric | Value |
+|--------|-------|
+| Total sessions | 14 |
+| Total input tokens (est.) | ~575,000 |
+| Total output tokens (est.) | ~247,000 |
+| **Total tokens** | **~822,000** |
+| **Total estimated cost** | **~$5.44** |
 
-Update this table after each significant work session. Token counts can be read from the Anthropic Console or estimated from file-diff sizes (~750 tokens per KB of code changed).
+---
+
+## Notes
+
+- All sessions used `claude-sonnet-4-6`.
+- Sessions 10–12 were heaviest: full DB migration + deployment debugging across 3 layers.
+- Session 1 was the single most impactful: fixed 4 bugs + full Q/A sweep in one pass.
+- Infrastructure costs (Vercel, Neon, Railway) all on free tiers — $0 additional.
