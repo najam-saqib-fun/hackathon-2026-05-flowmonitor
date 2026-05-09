@@ -10,7 +10,10 @@ function timeRange(q) {
   const clauses = [];
   const vals = [];
   if (start) { clauses.push('start_time >= ?'); vals.push(start); }
-  if (end)   { clauses.push('end_time <= ?');   vals.push(end); }
+  // Include active flows (end_time IS NULL) that started within the window.
+  // Without this, every page refresh excludes in-progress flows and the
+  // Total Bytes KPI oscillates as flows complete/restart.
+  if (end)   { clauses.push('(end_time IS NULL OR end_time <= ?)'); vals.push(end); }
   return { where: clauses.length ? 'WHERE ' + clauses.join(' AND ') : '', vals };
 }
 

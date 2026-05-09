@@ -748,9 +748,8 @@ static const SeedRow kSeedMappings[] = {
 
     // Pakistan ISPs
     {"ip_cidr", "119.160.63.0/24",    "Jazz (Mobilink)", "ISP"},
-    {"ip_cidr", "124.109.0.0/16",     "PTCL",       "ISP"},  // PTCL DSL (124.109.34.x observed)
     {"ip_cidr", "182.176.0.0/12",     "PTCL",       "ISP"},  // PTCL broadband (182.176-191)
-    {"ip_cidr", "202.165.249.0/24",   "PTCL",       "ISP"},  // PTCL mobile DSL
+    {"ip_cidr", "202.165.249.0/24",   "Nayatel",    "ISP"},  // PTCL mobile DSL
     {"ip_cidr", "101.50.0.0/15",      "Nayatel",    "ISP"},  // Nayatel Islamabad ISP
     {"ip_cidr", "1.9.0.0/16",         "TM Net",     "ISP"},  // TM Technology Malaysia
 

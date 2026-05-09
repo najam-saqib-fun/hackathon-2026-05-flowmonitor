@@ -129,17 +129,21 @@ export class TimeFilterComponent implements OnInit {
     const preset = this.presets.find(p => p.key === key);
     if (!preset) return;
     this.selectedPresetKey = key;
-    const end   = new Date();
-    const start = new Date(end.getTime() - preset.hours * 3_600_000);
+    const now   = new Date();
+    const start = new Date(now.getTime() - preset.hours * 3_600_000);
+    // end is intentionally omitted for presets — the window always ends at "now".
+    // Sending a truncated end timestamp would exclude flows that finalized within
+    // the current minute (end_time > truncated_now), causing Total Bytes to oscillate
+    // as active flows finalize and drop out of the filtered result.
     const filter: TimeFilter = {
       start: toLocal(start),
-      end:   toLocal(end),
+      end:   null,
       label: preset.label,
     };
     this._filter.set(filter);
     // Keep custom fields in sync so switching to Custom shows sensible values
     this.customStart = filter.start!.replace(' ', 'T');
-    this.customEnd   = filter.end!.replace(' ', 'T');
+    this.customEnd   = toLocal(now).replace(' ', 'T');
     this.filterChange.emit(filter);
   }
 
