@@ -8,7 +8,8 @@
 
 ## Decision 2: Bidirectional canonical flow key
 
-**Decision:** Flow key = `(min(src_ip, dst_ip), max(src_ip, dst_ip), src_port, dst_port, protocol)` — always stores the smaller IP first.
+**Decision:** Flow key = `(src_ip,  dst_ip, src_port, dst_port, protocol)`.
+
 **Rationale:** Without canonicalization, a TCP connection generates two rows (one per direction). Halving storage also halves query time for top-talker and bandwidth aggregations.
 **Trade-off:** `src_ip` no longer means "the initiating side." Added `bytes_sent`/`bytes_recv` columns to preserve directionality. UI always shows `src_ip` as the "smaller" address, which is unusual but documented.
 
