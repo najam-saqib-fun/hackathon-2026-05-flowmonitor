@@ -13,6 +13,7 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { ApiService } from '../../core/services/api.service';
+import { AuthService } from '../../core/services/auth.service';
 
 const CSV_MAPPING_COLS = ['pattern_type', 'pattern', 'application'];
 
@@ -121,7 +122,7 @@ function validateImportData(format: string, data: string, requiredCsvCols: strin
               <ng-container matColumnDef="actions">
                 <th mat-header-cell *matHeaderCellDef></th>
                 <td mat-cell *matCellDef="let r">
-                  <button mat-icon-button color="warn" (click)="deleteMapping(r.id)" matTooltip="Delete">
+                  <button *ngIf="isAdmin" mat-icon-button color="warn" (click)="deleteMapping(r.id)" matTooltip="Delete">
                     <mat-icon>delete</mat-icon>
                   </button>
                 </td>
@@ -136,7 +137,7 @@ function validateImportData(format: string, data: string, requiredCsvCols: strin
       </mat-tab>
 
       <!-- ── Add Single ─────────────────────────────────────── -->
-      <mat-tab label="Add Mapping">
+      <mat-tab label="Add Mapping" *ngIf="isAdmin">
         <div style="padding-top:1.5rem;max-width:600px;" [formGroup]="addForm">
           <div class="card">
             <div class="card-title">New Application Mapping</div>
@@ -183,7 +184,7 @@ function validateImportData(format: string, data: string, requiredCsvCols: strin
       </mat-tab>
 
       <!-- ── Bulk Import ────────────────────────────────────── -->
-      <mat-tab label="Bulk Import">
+      <mat-tab label="Bulk Import" *ngIf="isAdmin">
         <div style="padding-top:1.5rem;max-width:700px;">
           <div class="card">
             <div class="card-title">Bulk Import</div>
@@ -226,7 +227,9 @@ export class MappingsComponent implements OnInit {
   private api   = inject(ApiService);
   private snack = inject(MatSnackBar);
   private fb    = inject(FormBuilder);
+  private auth  = inject(AuthService);
 
+  isAdmin  = false;
   cols     = ['type', 'pattern', 'application', 'category', 'priority', 'actions'];
   rows     = signal<any[]>([]);
   total    = signal(0);
@@ -249,7 +252,11 @@ export class MappingsComponent implements OnInit {
     notes:        [''],
   });
 
-  ngOnInit() { this.load(); }
+  ngOnInit() {
+    this.isAdmin = this.auth.currentUser?.role === 'admin';
+    if (!this.isAdmin) this.cols = this.cols.filter(c => c !== 'actions');
+    this.load();
+  }
 
   search() { this.offset = 0; this.load(); }
   resetSearch() { this.searchText = ''; this.filterType = ''; this.offset = 0; this.load(); }

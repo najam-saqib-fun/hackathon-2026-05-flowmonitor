@@ -13,6 +13,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDialogModule } from '@angular/material/dialog';
 import { ApiService } from '../../core/services/api.service';
+import { AuthService } from '../../core/services/auth.service';
 
 const CSV_SUBSCRIBER_COLS = ['ip_address', 'subscriber_id'];
 
@@ -101,10 +102,10 @@ function validateSubscriberImport(format: string, data: string): string | null {
               <ng-container matColumnDef="actions">
                 <th mat-header-cell *matHeaderCellDef></th>
                 <td mat-cell *matCellDef="let r" style="white-space:nowrap;">
-                  <button mat-icon-button color="primary" (click)="startEdit(r)" matTooltip="Edit">
+                  <button *ngIf="isAdmin" mat-icon-button color="primary" (click)="startEdit(r)" matTooltip="Edit">
                     <mat-icon>edit</mat-icon>
                   </button>
-                  <button mat-icon-button color="warn" (click)="deleteSubscriber(r.id)" matTooltip="Delete">
+                  <button *ngIf="isAdmin" mat-icon-button color="warn" (click)="deleteSubscriber(r.id)" matTooltip="Delete">
                     <mat-icon>delete</mat-icon>
                   </button>
                 </td>
@@ -118,7 +119,7 @@ function validateSubscriberImport(format: string, data: string): string | null {
           </div>
 
           <!-- Inline edit panel -->
-          <div *ngIf="editRow()" class="card" style="margin-top:1rem;max-width:600px;" [formGroup]="editForm">
+          <div *ngIf="isAdmin && editRow()" class="card" style="margin-top:1rem;max-width:600px;" [formGroup]="editForm">
             <div class="card-title">Edit Subscriber — {{ editRow()!.ip_address }}</div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;">
               <mat-form-field appearance="outline">
@@ -151,7 +152,7 @@ function validateSubscriberImport(format: string, data: string): string | null {
       </mat-tab>
 
       <!-- ── Add Single ─────────────────────────────────────── -->
-      <mat-tab label="Add Subscriber">
+      <mat-tab label="Add Subscriber" *ngIf="isAdmin">
         <div style="padding-top:1.5rem;max-width:600px;" [formGroup]="addForm">
           <div class="card">
             <div class="card-title">New Subscriber Mapping</div>
@@ -184,7 +185,7 @@ function validateSubscriberImport(format: string, data: string): string | null {
       </mat-tab>
 
       <!-- ── Bulk Import ────────────────────────────────────── -->
-      <mat-tab label="Bulk Import">
+      <mat-tab label="Bulk Import" *ngIf="isAdmin">
         <div style="padding-top:1.5rem;max-width:700px;">
           <div class="card">
             <div class="card-title">Bulk Import</div>
@@ -229,7 +230,9 @@ export class SubscribersComponent implements OnInit {
   private api   = inject(ApiService);
   private snack = inject(MatSnackBar);
   private fb    = inject(FormBuilder);
+  private auth  = inject(AuthService);
 
+  isAdmin  = false;
   cols     = ['ip_address', 'subscriber_id', 'name', 'notes', 'created_at', 'actions'];
   rows     = signal<any[]>([]);
   total    = signal(0);
@@ -257,7 +260,11 @@ export class SubscribersComponent implements OnInit {
     notes:         [''],
   });
 
-  ngOnInit() { this.load(); }
+  ngOnInit() {
+    this.isAdmin = this.auth.currentUser?.role === 'admin';
+    if (!this.isAdmin) this.cols = this.cols.filter(c => c !== 'actions');
+    this.load();
+  }
 
   search() { this.offset = 0; this.load(); }
   resetSearch() { this.searchText = ''; this.offset = 0; this.load(); }

@@ -14,6 +14,7 @@ import { MatTabsModule } from '@angular/material/tabs';
 import { Subscription } from 'rxjs';
 import { ApiService } from '../../core/services/api.service';
 import { WebSocketService } from '../../core/services/websocket.service';
+import { AuthService } from '../../core/services/auth.service';
 
 @Component({
   selector: 'app-alerts',
@@ -34,7 +35,7 @@ import { WebSocketService } from '../../core/services/websocket.service';
       <mat-tab label="Alert Rules">
         <div style="padding-top:1rem;">
           <!-- Create rule form -->
-          <div class="card" style="margin-bottom:1rem;" [formGroup]="ruleForm">
+          <div *ngIf="isAdmin" class="card" style="margin-bottom:1rem;" [formGroup]="ruleForm">
             <div class="card-title">New Alert Rule</div>
             <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0.75rem;">
               <mat-form-field appearance="outline">
@@ -98,13 +99,14 @@ import { WebSocketService } from '../../core/services/websocket.service';
               <ng-container matColumnDef="enabled">
                 <th mat-header-cell *matHeaderCellDef style="color:#64748b;">Enabled</th>
                 <td mat-cell *matCellDef="let r">
-                  <mat-slide-toggle [checked]="r.enabled" (change)="toggleRule(r, $event.checked)"></mat-slide-toggle>
+                  <mat-slide-toggle *ngIf="isAdmin" [checked]="r.enabled" (change)="toggleRule(r, $event.checked)"></mat-slide-toggle>
+                  <span *ngIf="!isAdmin" [style.color]="r.enabled ? '#22c55e' : '#f87171'">{{ r.enabled ? 'Yes' : 'No' }}</span>
                 </td>
               </ng-container>
               <ng-container matColumnDef="actions">
                 <th mat-header-cell *matHeaderCellDef></th>
                 <td mat-cell *matCellDef="let r">
-                  <button mat-icon-button color="warn" (click)="deleteRule(r.id)" matTooltip="Delete">
+                  <button *ngIf="isAdmin" mat-icon-button color="warn" (click)="deleteRule(r.id)" matTooltip="Delete">
                     <mat-icon>delete</mat-icon>
                   </button>
                 </td>
@@ -166,8 +168,10 @@ export class AlertsComponent implements OnInit, OnDestroy {
   private snack   = inject(MatSnackBar);
   private ws      = inject(WebSocketService);
   private fb      = inject(FormBuilder);
+  private auth    = inject(AuthService);
   private alertSub?: Subscription;
 
+  isAdmin   = false;
   rules  = signal<any[]>([]);
   events = signal<any[]>([]);
   ruleCols  = ['name', 'metric', 'threshold', 'window', 'app', 'enabled', 'actions'];
@@ -183,6 +187,7 @@ export class AlertsComponent implements OnInit, OnDestroy {
   });
 
   ngOnInit() {
+    this.isAdmin = this.auth.currentUser?.role === 'admin';
     this.loadRules();
     this.loadEvents(false);
     this.alertSub = this.ws.alert$.subscribe(alert => {

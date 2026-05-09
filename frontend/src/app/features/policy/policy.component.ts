@@ -14,6 +14,7 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatAutocompleteModule } from '@angular/material/autocomplete';
 import { debounceTime, distinctUntilChanged, switchMap, of } from 'rxjs';
 import { ApiService } from '../../core/services/api.service';
+import { AuthService } from '../../core/services/auth.service';
 
 interface PolicyRow {
   application: string;
@@ -49,7 +50,7 @@ interface PolicyRow {
     </div>
 
     <!-- ── Add Rule card ────────────────────────────────────── -->
-    <div class="card add-card">
+    <div *ngIf="isAdmin" class="card add-card">
       <div class="card-title" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.6rem;">
         <mat-icon style="color:#818cf8;font-size:1.1rem;height:1.1rem;width:1.1rem;">add_circle</mat-icon>
         Add / Override Rule
@@ -108,11 +109,11 @@ interface PolicyRow {
 
       <div style="flex:1;"></div>
 
-      <button mat-stroked-button (click)="enableAll()"
+      <button *ngIf="isAdmin" mat-stroked-button (click)="enableAll()"
               matTooltip="Enable capture for all applications in the list">
         <mat-icon>check_circle</mat-icon> Enable All
       </button>
-      <button mat-stroked-button (click)="disableAll()"
+      <button *ngIf="isAdmin" mat-stroked-button (click)="disableAll()"
               matTooltip="Disable capture for all applications in the list">
         <mat-icon>block</mat-icon> Disable All
       </button>
@@ -180,10 +181,13 @@ interface PolicyRow {
         <ng-container matColumnDef="capture">
           <th mat-header-cell *matHeaderCellDef class="th-cell" style="text-align:center;">Capture</th>
           <td mat-cell *matCellDef="let r" style="text-align:center;">
-            <mat-slide-toggle [(ngModel)]="r._enabled" (ngModelChange)="onToggle()"
+            <mat-slide-toggle *ngIf="isAdmin" [(ngModel)]="r._enabled" (ngModelChange)="onToggle()"
               color="primary"
               [matTooltip]="r._enabled ? 'Enabled — click to block' : 'Blocked — click to allow'">
             </mat-slide-toggle>
+            <span *ngIf="!isAdmin" [style.color]="r._enabled ? '#4ade80' : '#f87171'">
+              {{ r._enabled ? 'Allowed' : 'Blocked' }}
+            </span>
           </td>
         </ng-container>
 
@@ -199,7 +203,7 @@ interface PolicyRow {
     </div>
 
     <!-- Sticky Save bar -->
-    <div class="save-bar" [ngClass]="{'save-bar-visible': dirty()}">
+    <div *ngIf="isAdmin" class="save-bar" [ngClass]="{'save-bar-visible': dirty()}">
       <span style="font-size:0.88rem;color:#94a3b8;">
         {{ dirtyCount() }} unsaved change{{ dirtyCount() === 1 ? '' : 's' }}
       </span>
@@ -254,6 +258,9 @@ interface PolicyRow {
 export class PolicyComponent implements OnInit {
   private api   = inject(ApiService);
   private snack = inject(MatSnackBar);
+  private auth  = inject(AuthService);
+
+  isAdmin = false;
 
   cols    = ['application', 'category', 'total_flows', 'total_bytes', 'capture'];
   rows    = signal<PolicyRow[]>([]);
@@ -282,6 +289,7 @@ export class PolicyComponent implements OnInit {
   });
 
   ngOnInit() {
+    this.isAdmin = this.auth.currentUser?.role === 'admin';
     this.load();
     // Wire autocomplete: debounce keystrokes, fetch matching app names
     this.appCtrl.valueChanges.pipe(
